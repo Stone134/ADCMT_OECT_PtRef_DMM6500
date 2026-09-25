@@ -52,8 +52,9 @@ does not establish the computer's network settings.
 ## Run the program
 
 ```bash
-python3 -m pip install -r requirements.txt
-python3 gui.py
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python gui.py
 ```
 
 Or double-click `launch_gui.command` on macOS. **Simulation is selected when
