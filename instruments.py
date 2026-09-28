@@ -1,4 +1,4 @@
-"""LAN drivers for one ADCMT 6541 OECT and a passive Pt-reference DMM6500.
+"""LAN drivers for one ADCMT 6541 OECT and a passive reference DMM6500.
 
 The ADCMT 6541 clocks both current measurements internally.  The DMM6500 is
 queried separately over LAN, so its reference reading is *near* the ADCMT
@@ -414,7 +414,7 @@ class ADCMT6541:
 
 
 class DMM6500:
-    """Passive Pt-minus-source DC-voltage reader using FRONT terminals."""
+    """Passive reference-minus-source DC-voltage reader using FRONT terminals."""
 
     def __init__(self, host: str, port: int = 5025, timeout_s: float = 5) -> None:
         self.io = _LineSocket(host, port, timeout_s)
@@ -483,7 +483,7 @@ class DMM6500:
             raise InstrumentError("Connect to DMM6500 before configuring")
         self._require_scpi_front()
         # No *RST here: it would temporarily restore 10 MΩ and could load a
-        # Pt quasi-reference that is already connected.  Set and verify each
+        # reference electrode that is already connected. Set and verify each
         # relevant function directly, before enabling ADCMT output.
         # Remote DMM operation uses the trigger-model path. Abort a scan or
         # trigger model left by a previous program, then load a one-reading
@@ -514,7 +514,7 @@ class DMM6500:
         self._configured = True
 
     def read_vref(self) -> float:
-        """Return DMM INPUT HI (Pt) minus INPUT LO (OECT source), in volts."""
+        """Return DMM INPUT HI (reference) minus INPUT LO (OECT source), in volts."""
         if not self._configured:
             raise InstrumentError("DMM6500 is not configured for reference sensing")
         # A reset, range change, terminal switch, or scan can silently replace

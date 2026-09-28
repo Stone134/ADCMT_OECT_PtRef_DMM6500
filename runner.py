@@ -1,4 +1,4 @@
-"""Single-OECT acquisition with a separate, current-free Pt voltage probe.
+"""Single-OECT acquisition with a separate, high-impedance reference probe.
 
 CH1/CH2 current samples are synchronized inside the ADCMT. The DMM6500 reading
 is taken immediately afterwards over LAN and gets its own host timestamp; it is
@@ -29,7 +29,7 @@ FIELDS = (
     # Preserve the five familiar OECT columns first. GateV and DrainV are
     # verified source setpoints; Vref is the actual Keithley voltage reading.
     "Time", "GateI", "GateV", "DrainI", "DrainV", "Vref",
-    "ERef", "TargetV", "Stage", "Phase", "UTC", "DMMReadUTC",
+    "Eref", "TargetV", "Stage", "Phase", "UTC", "DMMReadUTC",
     "ADCMTIndex", "ADCMTSampleTime", "ADCMTSkipped", "WithinTolerance",
 )
 
@@ -55,8 +55,8 @@ class RawDataWriter:
         metadata["started_utc"] = utc_now()
         metadata["data_columns"] = list(FIELDS)
         metadata["notes"] = (
-            "Vref is measured by DMM6500 with INPUT HI at separate Pt and INPUT LO "
-            "at OECT source. ERef = Vref = V(Pt) - V(source), following the "
+            "Vref is measured by DMM6500 with INPUT HI at the reference electrode and INPUT LO "
+            "at OECT source. Eref = Vref = V(reference) - V(source), following the "
             "same-sign setting used for this run. ADCMTIndex refers to the latest "
             "common CH1/CH2 hardware sample; the DMM reading follows it over LAN. "
             "GateV and DrainV are verified ADCMT voltage source setpoints, not "
@@ -97,8 +97,12 @@ class RawDataWriter:
 class SimulatedADCMT:
     """Exercise the same run logic without opening a network connection."""
 
-    def __init__(self, interval_s: float) -> None:
+    def __init__(self, interval_s: float, feedback_polarity: int = 1) -> None:
         self.interval_s = interval_s
+        # The simulated cell follows the selected response direction. This
+        # exercises either controller setting; it cannot identify a real cell's
+        # response direction, which must be established experimentally.
+        self.feedback_polarity = feedback_polarity
         self.gate_v = 0.0
         self.vds_v = 0.0
         self.started: float | None = None
@@ -132,8 +136,8 @@ class SimulatedADCMT:
         index = max(self.last_index + 1, int(elapsed / self.interval_s))
         skipped = index - self.last_index - 1
         self.last_index = index
-        # The requested default convention is same-sign Vg/Vref/ERef.
-        e = 0.82 * self.gate_v + 0.003 * math.sin(elapsed / 12)
+        # The default convention is same-sign Vg/Vref/Eref.
+        e = self.feedback_polarity * 0.82 * self.gate_v + 0.003 * math.sin(elapsed / 12)
         conductance = 1.5e-6 + 4.0e-5 * abs(e)
         id_a = self.vds_v * conductance + 2e-9 * math.sin(elapsed * 0.6)
         ig_a = -self.gate_v * 1.2e-8 + 4e-10 * math.cos(elapsed * 0.4)
@@ -163,9 +167,10 @@ class SimulatedDMM:
         return None
 
     def read_vref(self) -> float:
-        # The Pt voltage is deliberately distinct from the programmed gate V.
+        # The reference voltage is deliberately distinct from the programmed gate V.
         elapsed = 0.0 if self.adcmt.started is None else time.monotonic() - self.adcmt.started
-        return 0.82 * self.adcmt.gate_v + 0.003 * math.sin(elapsed / 12)
+        return (self.adcmt.feedback_polarity * 0.82 * self.adcmt.gate_v
+                + 0.003 * math.sin(elapsed / 12))
 
     def close(self) -> None:
         return None
@@ -189,18 +194,17 @@ def run_experiment(
     on_status: Callable[[str], None] | None = None,
     stop_event: threading.Event | None = None,
 ) -> RunResult:
-    """Run one gate staircase or one Pt-referenced source-potential staircase.
+    """Run an Eref target staircase using bounded gate-voltage feedback.
 
-    In pt_feedback mode the target is ERef, defined with the same sign as the
-    DMM Vref reading: V(Pt)−V(source). In gate_monitor mode the staircase is
-    the electrical Vgate−Vsource and Pt is monitored/logged only.
+    Eref uses the DMM Vref sign: V(reference)−V(source). The selected response
+    direction determines which gate adjustment reduces the target error.
     """
     config.validate()
     stop = stop_event or threading.Event()
     status = on_status or (lambda _message: None)
     report = on_sample or (lambda _sample: None)
 
-    adcmt = SimulatedADCMT(config.sample_interval_s) if config.simulation else ADCMT6541(
+    adcmt = SimulatedADCMT(config.sample_interval_s, config.feedback_polarity) if config.simulation else ADCMT6541(
         config.adcmt_ip, config.port, timeout_s=max(5.0, config.sample_interval_s * 3)
     )
     dmm = SimulatedDMM(adcmt) if config.simulation else DMM6500(
@@ -208,7 +212,7 @@ def run_experiment(
     )
     writer: RawDataWriter | None = None
     started: float | None = None
-    gate_v = config.gate_initial_v if config.mode == "pt_feedback" else config.levels[0]
+    gate_v = config.gate_initial_v
     saturated_count = 0
     stopped = False
     failure: Exception | None = None
@@ -252,12 +256,8 @@ def run_experiment(
                 last_target = levels[stage_index]
                 stage_has_sample = False
                 saturated_count = 0
-                if config.mode == "gate_monitor":
-                    gate_v = adcmt.set_gate(last_target)
-                    gate_changed_at = time.monotonic()
                 status(f"Level {stage_index + 1}/{len(levels)}: "
-                       f"{'Vg' if config.mode == 'gate_monitor' else 'target ERef'} "
-                       f"{last_target:+.4f} V")
+                       f"target Eref {last_target:+.4f} V")
 
             pair = adcmt.read_next(timeout_s=max(5.0, config.sample_interval_s * 3))
             if stop.is_set():
@@ -265,11 +265,13 @@ def run_experiment(
                 break
             if gate_changed_at is not None:
                 # The ADCMT buffers may still contain a current sample from
-                # before a CH2 voltage update.  Wait for a full sampling period
-                # after the command so GateV is genuinely associated with the
-                # returned current pair.  Count every discarded pair as skipped.
+                # before a CH2 voltage update.  The next sample after the
+                # command is already a new pair. Waiting one whole additional
+                # interval would discard it, turning a 1 s cadence into 2 s
+                # whenever feedback changes Vg. Only discard a pair whose nominal
+                # sample time is at or before the gate command.
                 command_elapsed = gate_changed_at - started
-                if pair.nominal_elapsed_s < command_elapsed + config.sample_interval_s:
+                if pair.nominal_elapsed_s <= command_elapsed:
                     discarded_since_row += pair.skipped + 1
                     continue
                 gate_changed_at = None
@@ -287,7 +289,6 @@ def run_experiment(
                 phase = "settling"
             else:
                 phase = "measure"
-            measured_target = e_reference if config.mode == "pt_feedback" else gate_v
             sample = Sample(
                 utc=utc_now(), elapsed_s=elapsed, stage_index=stage_index + 1,
                 phase=phase, target_v=last_target, gate_i_a=pair.gate_i_a,
@@ -296,26 +297,25 @@ def run_experiment(
                 adcmt_index=pair.index,
                 adcmt_nominal_elapsed_s=pair.nominal_elapsed_s,
                 adcmt_skipped=pair.skipped + discarded_since_row, dmm_read_utc=dmm_time,
-                within_tolerance=abs(last_target - measured_target) <= config.feedback_tolerance_v,
+                within_tolerance=abs(last_target - e_reference) <= config.feedback_tolerance_v,
             )
             writer.write(sample)
             discarded_since_row = 0
             stage_has_sample = True
             report(sample)
-            if config.mode == "pt_feedback":
-                new_gate_v = next_feedback_gate(gate_v, last_target,
-                                                e_reference, config)
-                if not math.isclose(new_gate_v, gate_v, abs_tol=1e-12):
-                    gate_v = adcmt.set_gate(new_gate_v)
-                    gate_changed_at = time.monotonic()
-                at_limit = (math.isclose(gate_v, config.gate_min_v, abs_tol=1e-8) or
-                            math.isclose(gate_v, config.gate_max_v, abs_tol=1e-8))
-                if at_limit and abs(last_target - e_reference) > max(0.05, 2 * config.feedback_tolerance_v):
-                    saturated_count += 1
-                    if saturated_count >= 10:
-                        raise RuntimeError("Feedback could not reach target before the gate limit; outputs stopped")
-                else:
-                    saturated_count = 0
+            new_gate_v = next_feedback_gate(gate_v, last_target,
+                                            e_reference, config)
+            if not math.isclose(new_gate_v, gate_v, abs_tol=1e-12):
+                gate_v = adcmt.set_gate(new_gate_v)
+                gate_changed_at = time.monotonic()
+            at_limit = (math.isclose(gate_v, config.gate_min_v, abs_tol=1e-8) or
+                        math.isclose(gate_v, config.gate_max_v, abs_tol=1e-8))
+            if at_limit and abs(last_target - e_reference) > max(0.05, 2 * config.feedback_tolerance_v):
+                saturated_count += 1
+                if saturated_count >= 10:
+                    raise RuntimeError("Feedback could not reach target before the gate limit; outputs stopped")
+            else:
+                saturated_count = 0
         stopped = stopped or stop.is_set()
         return RunResult(config.output_path, writer.samples, stopped)
     except Exception as exc:

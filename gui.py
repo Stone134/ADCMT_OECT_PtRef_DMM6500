@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Desktop front panel for one ADCMT-driven OECT with a DMM6500 Pt reference."""
+"""Desktop front panel for one ADCMT-driven OECT with a DMM6500 reference input."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from models import RunConfig, Sample
 from runner import run_experiment
 
 
-APP_TITLE = "OECT measurement • Pt reference and DMM6500"
+APP_TITLE = "OECT with reference"
 PROJECT_DIR = Path(__file__).resolve().parent
 
 
@@ -114,14 +114,13 @@ class OECTWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_TITLE)
         self.resize(1450, 930)
-        self.setMinimumSize(1110, 680)
+        self.setMinimumSize(1110, 820)
         self.worker: AcquisitionWorker | None = None
         self.connection_worker: ConnectionWorker | None = None
         self._last_result: tuple[bool, str] | None = None
         self._pending_close = False
         self._sample_count = 0
         self._duration_s = 1.0
-        self._feedback_run = False
         self._plot_data: dict[str, list[float]] = {
             "time": [], "id": [], "vg": [], "vref": [], "target_ref": [],
         }
@@ -141,7 +140,6 @@ class OECTWindow(QtWidgets.QMainWindow):
         outer.addWidget(self._footer())
 
         self._apply_style()
-        self._mode_changed()
         self._simulation_changed(True)
 
     def _header(self) -> QtWidgets.QWidget:
@@ -150,9 +148,9 @@ class OECTWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QHBoxLayout(card)
         layout.setContentsMargins(18, 13, 18, 13)
         title_box = QtWidgets.QVBoxLayout()
-        title = QtWidgets.QLabel("OECT with Pt quasi-reference")
+        title = QtWidgets.QLabel(APP_TITLE)
         title.setObjectName("title")
-        subtitle = QtWidgets.QLabel("ADCMT 6541 • CH1 drain / CH2 gate  |  DMM6500 • Pt voltage")
+        subtitle = QtWidgets.QLabel("ADCMT 6541 • CH1 drain / CH2 gate  |  DMM6500 • Reference voltage")
         subtitle.setProperty("muted", True)
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -163,25 +161,30 @@ class OECTWindow(QtWidgets.QMainWindow):
         return card
 
     def _control_panel(self) -> QtWidgets.QWidget:
+        controls = QtWidgets.QWidget()
+        controls.setMinimumWidth(560)
+        controls.setMaximumWidth(620)
+        controls_layout = QtWidgets.QVBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(10)
         scroll = QtWidgets.QScrollArea()
         scroll.setObjectName("controlScroll")
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        scroll.setMinimumWidth(538)
-        scroll.setMaximumWidth(620)
         panel = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 4, 0)
         layout.setSpacing(10)
         layout.addWidget(self._connection_card())
-        layout.addWidget(self._mode_card())
+        layout.addWidget(self._output_card())
         layout.addWidget(self._sweep_card())
         layout.addWidget(self._feedback_card())
-        layout.addWidget(self._output_card())
         layout.addStretch(1)
         scroll.setWidget(panel)
-        return scroll
+        controls_layout.addWidget(scroll, 1)
+        controls_layout.addWidget(self._run_controls())
+        return controls
 
     @staticmethod
     def _group_grid(title: str) -> tuple[QtWidgets.QGroupBox, QtWidgets.QGridLayout]:
@@ -205,6 +208,7 @@ class OECTWindow(QtWidgets.QMainWindow):
 
     def _connection_card(self) -> QtWidgets.QWidget:
         group, grid = self._group_grid("Connection")
+        self.connection_group = group
         self.simulation = QtWidgets.QCheckBox("Simulation • no instrument commands")
         self.simulation.setChecked(True)
         self.simulation.toggled.connect(self._simulation_changed)
@@ -226,27 +230,14 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.test_button.setProperty("secondary", True)
         self.test_button.clicked.connect(self._test_connections)
         grid.addWidget(self.test_button, 2, 2, 1, 2)
-        note = QtWidgets.QLabel("DMM front INPUT HI → Pt  •  INPUT LO → OECT source")
+        note = QtWidgets.QLabel("DMM front INPUT HI → Reference  •  INPUT LO → OECT source")
         note.setProperty("muted", True)
         note.setWordWrap(True)
         grid.addWidget(note, 3, 0, 1, 4)
         return group
 
-    def _mode_card(self) -> QtWidgets.QWidget:
-        group, grid = self._group_grid("Measurement mode")
-        self.mode = QtWidgets.QComboBox()
-        self.mode.addItem("Gate sweep • monitor Pt", "gate_monitor")
-        self.mode.addItem("Pt feedback • control source vs Pt", "pt_feedback")
-        self.mode.currentIndexChanged.connect(self._mode_changed)
-        grid.addWidget(self.mode, 0, 0)
-        self.mode_help = QtWidgets.QLabel()
-        self.mode_help.setWordWrap(True)
-        self.mode_help.setProperty("muted", True)
-        grid.addWidget(self.mode_help, 1, 0)
-        return group
-
     def _sweep_card(self) -> QtWidgets.QWidget:
-        self.sweep_group, grid = self._group_grid("OECT sweep")
+        self.sweep_group, grid = self._group_grid("Target Eref sweep")
         defaults = RunConfig()
         self.vds = spin(-3, 3, defaults.vds_v, 0.01, 4, " V")
         self.sweep_start = spin(-3, 3, defaults.sweep_start_v, 0.1, 4, " V")
@@ -256,29 +247,26 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.delay = spin(0, 999_999, defaults.delay_s, 0.1, 3, " s")
         self.final_keep = spin(0, 1_000_000, defaults.final_keep_s, 60, 3, " s")
         self.interval = spin(0.1, 60, defaults.sample_interval_s, 0.1, 3, " s")
-        self.drain_limit = spin(0.000001, 0.3, defaults.drain_limit_a, 0.001, 6, " A")
-        self.gate_limit = spin(0.000001, 0.3, defaults.gate_limit_a, 0.001, 6, " A")
-        self.start_label = QtWidgets.QLabel("Vg initial")
-        self.stop_label = QtWidgets.QLabel("Vg final")
-        self.step_label = QtWidgets.QLabel("Vg step")
+        self.start_label = QtWidgets.QLabel("Eref initial")
+        self.stop_label = QtWidgets.QLabel("Eref final")
+        self.step_label = QtWidgets.QLabel("Eref step")
         fields = (
             ((QtWidgets.QLabel("Vds"), self.vds), (QtWidgets.QLabel("Period"), self.hold)),
             ((self.start_label, self.sweep_start), (QtWidgets.QLabel("Delay"), self.delay)),
             ((self.stop_label, self.sweep_stop), (QtWidgets.QLabel("Keep at final"), self.final_keep)),
             ((self.step_label, self.sweep_step), (QtWidgets.QLabel("Read interval"), self.interval)),
-            ((QtWidgets.QLabel("Drain limit"), self.drain_limit), (QtWidgets.QLabel("Gate limit"), self.gate_limit)),
         )
         for row, pair in enumerate(fields):
             for column, (caption, control) in enumerate(pair):
                 grid.addWidget(self._row_field(caption, control), row, column)
-        note = QtWidgets.QLabel("Delay is inside each period. Current limits are ADCMT compliance settings.")
+        note = QtWidgets.QLabel("Delay is inside each period. Drain and gate current limits: 0.003 A each.")
         note.setProperty("muted", True)
         note.setWordWrap(True)
         grid.addWidget(note, len(fields), 0, 1, 2)
         return self.sweep_group
 
     def _feedback_card(self) -> QtWidgets.QWidget:
-        group, grid = self._group_grid("Gate bounds and Pt feedback")
+        group, grid = self._group_grid("Gate bounds and reference feedback")
         defaults = RunConfig()
         self.gate_min = spin(-3, 3, defaults.gate_min_v, 0.1, 4, " V")
         self.gate_max = spin(-3, 3, defaults.gate_max_v, 0.1, 4, " V")
@@ -287,9 +275,14 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.max_step = spin(0.0001, 3, defaults.feedback_max_step_v, 0.01, 4, " V")
         self.tolerance = spin(0, 3, defaults.feedback_tolerance_v, 0.001, 4, " V")
         self.polarity = QtWidgets.QComboBox()
-        self.polarity.addItem("Vg − lowers E (same sign)", +1)
-        self.polarity.addItem("Vg + lowers E", -1)
+        self.polarity.addItem("Decrease Vg lowers Eref (same direction)", +1)
+        self.polarity.addItem("Increase Vg lowers Eref (opposite direction)", -1)
         self.polarity.setCurrentIndex(0)
+        self.polarity.setToolTip(
+            "Choose how your cell responds to a gate-voltage change.\n"
+            "Decrease Vg: e.g. −0.30 → −0.32 V. Increase Vg: −0.30 → −0.28 V.\n"
+            "This selects the feedback direction; the DMM reading keeps its measured sign."
+        )
         rows = (
             (("Gate min", self.gate_min), ("Gate max", self.gate_max)),
             (("Initial gate", self.gate_initial), ("Correction factor", self.correction_factor)),
@@ -299,7 +292,9 @@ class OECTWindow(QtWidgets.QMainWindow):
             for column, (caption, control) in enumerate(pair):
                 grid.addWidget(self._row_field(QtWidgets.QLabel(caption), control), row, column)
         grid.addWidget(self._row_field(QtWidgets.QLabel("Direction"), self.polarity), 3, 0, 1, 2)
-        note = QtWidgets.QLabel("ERef = Vref = VPt − Vsource. Negative Vg, Vref, and ERef have the same sign.")
+        note = QtWidgets.QLabel(
+            "Eref = Vref = V(reference) − V(source). The gate adjusts to follow the Eref target."
+        )
         note.setProperty("muted", True)
         note.setWordWrap(True)
         grid.addWidget(note, 4, 0, 1, 2)
@@ -308,6 +303,7 @@ class OECTWindow(QtWidgets.QMainWindow):
 
     def _output_card(self) -> QtWidgets.QWidget:
         group, grid = self._group_grid("Raw data")
+        self.output_group = group
         self.output = QtWidgets.QLineEdit(RunConfig.output_file)
         self.output.setToolTip("Relative filenames are saved inside this project folder")
         self.browse_button = QtWidgets.QPushButton("Browse")
@@ -321,10 +317,14 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.progress.setFixedWidth(125)
         self.progress_detail = QtWidgets.QLabel("Ready")
         self.progress_detail.setProperty("muted", True)
-        grid.addWidget(self.progress, 1, 0)
-        grid.addWidget(self.progress_detail, 1, 1)
-        note = QtWidgets.QLabel("Every raw-data row includes measured Vref (Pt − source).")
+        progress_row = QtWidgets.QHBoxLayout()
+        progress_row.addWidget(self.progress)
+        progress_row.addStretch(1)
+        progress_row.addWidget(self.progress_detail)
+        grid.addLayout(progress_row, 1, 0, 1, 2)
+        note = QtWidgets.QLabel("Every row includes measured Vref and Eref (reference − source).")
         note.setProperty("muted", True)
+        note.setWordWrap(True)
         grid.addWidget(note, 2, 0, 1, 2)
         return group
 
@@ -338,7 +338,7 @@ class OECTWindow(QtWidgets.QMainWindow):
         specs = (
             ("id", "OECT • Drain current (CH1)", "Id", "A", "#078A84"),
             ("vg", "OECT • Gate voltage command (CH2)", "Vg", "V", "#1CA89B"),
-            ("vref", "Pt reference • DMM6500 measured", "Vref / ERef", "V", "#8260BE"),
+            ("vref", "Reference • DMM6500 measured", "Vref / Eref", "V", "#8260BE"),
         )
         for row, (key, title, ylabel, units, color) in enumerate(specs):
             plot = pg.PlotWidget(
@@ -353,10 +353,10 @@ class OECTWindow(QtWidgets.QMainWindow):
             plot.setLabel("left", ylabel, units=units, color="#526378")
             plot.getViewBox().invertY(True)
             plot.showGrid(x=True, y=True, alpha=0.14)
-            plot.getAxis("left").setTextPen("#526378")
-            plot.getAxis("bottom").setTextPen("#526378")
             plot.getAxis("left").setPen("#CAD5E3")
             plot.getAxis("bottom").setPen("#CAD5E3")
+            plot.getAxis("left").setTextPen("#526378")
+            plot.getAxis("bottom").setTextPen("#526378")
             plot.setDownsampling(auto=True, mode="peak")
             plot.setClipToView(True)
             self.plots[key] = plot
@@ -368,12 +368,29 @@ class OECTWindow(QtWidgets.QMainWindow):
                 name="Vref measured" if key == "vref" else None,
             )
             grid.addWidget(plot, row, 0)
+            grid.setRowStretch(row, 1)
         self.curves["target_ref"] = self.plots["vref"].plot(
             pen=pg.mkPen("#A76647", width=1.5, style=QtCore.Qt.DashLine),
-            connect="finite", name="E target"
+            connect="finite", name="Eref target"
         )
-        self.curves["target_ref"].setVisible(False)
         return panel
+
+    def _run_controls(self) -> QtWidgets.QWidget:
+        card = QtWidgets.QFrame()
+        card.setObjectName("controlActions")
+        layout = QtWidgets.QHBoxLayout(card)
+        layout.setContentsMargins(12, 9, 12, 9)
+        layout.setSpacing(10)
+        self.start_button = QtWidgets.QPushButton("Start measurement")
+        self.start_button.setObjectName("startButton")
+        self.start_button.clicked.connect(self._start)
+        self.stop_button = QtWidgets.QPushButton("Stop safely")
+        self.stop_button.setObjectName("stopButton")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self._stop)
+        layout.addWidget(self.start_button, 1)
+        layout.addWidget(self.stop_button, 1)
+        return card
 
     def _footer(self) -> QtWidgets.QWidget:
         card = QtWidgets.QFrame()
@@ -388,19 +405,9 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.status_label.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Preferred)
         self.sample_label = QtWidgets.QLabel("0 samples")
         self.sample_label.setProperty("muted", True)
-        self.start_button = QtWidgets.QPushButton("Start measurement")
-        self.start_button.setObjectName("startButton")
-        self.start_button.clicked.connect(self._start)
-        self.stop_button = QtWidgets.QPushButton("Stop safely")
-        self.stop_button.setObjectName("stopButton")
-        self.stop_button.setEnabled(False)
-        self.stop_button.clicked.connect(self._stop)
         layout.addWidget(self.status_dot)
         layout.addWidget(self.status_label, 1)
         layout.addWidget(self.sample_label)
-        layout.addSpacing(12)
-        layout.addWidget(self.start_button)
-        layout.addWidget(self.stop_button)
         return card
 
     def _apply_style(self) -> None:
@@ -411,7 +418,7 @@ class OECTWindow(QtWidgets.QMainWindow):
             QMainWindow { background: #F6F2EA; }
             QWidget { color: #273449; font-family: 'Helvetica Neue'; font-size: 13px; }
             QScrollArea#controlScroll { background: transparent; border: 0; }
-            QFrame#headerCard, QFrame#footerCard, QGroupBox { background: #FFFCF6; border: 1px solid #E2DACE; border-radius: 10px; }
+            QFrame#headerCard, QFrame#footerCard, QFrame#controlActions, QGroupBox { background: #FFFCF6; border: 1px solid #E2DACE; border-radius: 10px; }
             QFrame#headerCard { border-left: 4px solid #0D9D93; }
             QLabel#title { font-size: 23px; font-weight: 700; color: #1C3045; }
             QLabel[muted="true"] { color: #63758B; }
@@ -441,24 +448,6 @@ class OECTWindow(QtWidgets.QMainWindow):
             """.replace("__ARROW_UP__", arrow_up).replace("__ARROW_DOWN__", arrow_down)
         )
 
-    def _mode_changed(self, *_args: object) -> None:
-        feedback = self.mode.currentData() == "pt_feedback"
-        self.sweep_group.setTitle(
-            "Target E(source − Pt) sweep" if feedback else "Gate voltage sweep • CH2"
-        )
-        self.start_label.setText("ERef initial" if feedback else "Vg initial")
-        self.stop_label.setText("ERef final" if feedback else "Vg final")
-        self.step_label.setText("ERef step" if feedback else "Vg step")
-        self.mode_help.setText(
-            "DMM reads Vref = VPt − Vsource. The gate is adjusted to follow each target ERef = Vref."
-            if feedback else
-            "ADCMT steps the gate command. DMM records Vref = VPt − Vsource; the Pt reading does not change the gate command."
-        )
-        for control in self.feedback_controls:
-            control.setEnabled(feedback and self.worker is None)
-        if self.worker is None:
-            self.curves["target_ref"].setVisible(feedback)
-
     def _simulation_changed(self, checked: bool) -> None:
         for widget in (self.adcmt_ip, self.dmm_ip, self.port, self.test_button):
             widget.setEnabled(not checked and self.worker is None)
@@ -468,7 +457,7 @@ class OECTWindow(QtWidgets.QMainWindow):
             "background: #FFF0D9; color: #785318;"
         )
         self.status_label.setText(
-            "Ready • simulation mode" if checked else "Ready • verify Pt wiring and gate polarity"
+            "Ready • simulation mode" if checked else "Ready • verify reference wiring and gate direction"
         )
 
     def _browse_output(self) -> None:
@@ -488,7 +477,6 @@ class OECTWindow(QtWidgets.QMainWindow):
             adcmt_ip=self.adcmt_ip.text().strip(),
             dmm_ip=self.dmm_ip.text().strip(),
             port=self.port.value(),
-            mode=self.mode.currentData(),
             vds_v=self.vds.value(),
             sweep_start_v=self.sweep_start.value(),
             sweep_stop_v=self.sweep_stop.value(),
@@ -497,8 +485,6 @@ class OECTWindow(QtWidgets.QMainWindow):
             delay_s=self.delay.value(),
             final_keep_s=self.final_keep.value(),
             sample_interval_s=self.interval.value(),
-            drain_limit_a=self.drain_limit.value(),
-            gate_limit_a=self.gate_limit.value(),
             gate_initial_v=self.gate_initial.value(),
             gate_min_v=self.gate_min.value(),
             gate_max_v=self.gate_max.value(),
@@ -540,8 +526,6 @@ class OECTWindow(QtWidgets.QMainWindow):
                 return
         self._clear_plots()
         self._duration_s = config.duration_s
-        self._feedback_run = config.mode == "pt_feedback"
-        self.curves["target_ref"].setVisible(self._feedback_run)
         self._last_result = None
         self.worker = AcquisitionWorker(config, self)
         self.worker.sample_ready.connect(self._on_sample)
@@ -568,19 +552,17 @@ class OECTWindow(QtWidgets.QMainWindow):
         data["id"].append(sample.drain_i_a)
         data["vg"].append(sample.gate_v)
         data["vref"].append(sample.vref_v)
-        if self._feedback_run:
-            data["target_ref"].append(sample.target_v)
+        data["target_ref"].append(sample.target_v)
         self.curves["id"].setData(data["time"], data["id"])
         self.curves["vg"].setData(data["time"], data["vg"], stepMode="right")
         self.curves["vref"].setData(data["time"], data["vref"])
-        if self._feedback_run:
-            self.curves["target_ref"].setData(data["time"], data["target_ref"], stepMode="right")
+        self.curves["target_ref"].setData(data["time"], data["target_ref"], stepMode="right")
         self._sample_count += 1
         self.sample_label.setText(f"{self._sample_count} samples")
         self.progress.setValue(min(99, max(0, int(100 * sample.elapsed_s / self._duration_s))))
         self.progress_detail.setText(f"Level {sample.stage_index} • {sample.phase}")
         self.status_label.setText(
-            f"Vref / ERef {sample.vref_v:+.4g} V  •  target {sample.target_v:+.4g} V"
+            f"Vref / Eref {sample.vref_v:+.4g} V  •  target {sample.target_v:+.4g} V"
         )
 
     @QtCore.pyqtSlot(str)
@@ -612,16 +594,15 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
         self.simulation.setEnabled(not running)
-        self.mode.setEnabled(not running)
         for widget in (
             self.vds, self.sweep_start, self.sweep_stop, self.sweep_step,
             self.hold, self.delay, self.final_keep, self.interval,
-            self.drain_limit, self.gate_limit, self.gate_min, self.gate_max,
+            self.gate_min, self.gate_max,
             self.output, self.browse_button,
         ):
             widget.setEnabled(not running)
         for widget in self.feedback_controls:
-            widget.setEnabled(not running and self.mode.currentData() == "pt_feedback")
+            widget.setEnabled(not running)
         live_editable = not running and not self.simulation.isChecked()
         for widget in (self.adcmt_ip, self.dmm_ip, self.port, self.test_button):
             widget.setEnabled(live_editable)

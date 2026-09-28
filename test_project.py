@@ -82,13 +82,15 @@ class _ADCMTFake:
         self.started = False
         self.shutdown_calls = 0
         self.shutdown_error = shutdown_error
+        self.configure_args: tuple[object, ...] = ()
 
     def connect(self) -> str:
         self.connected = True
         return "ADCMT 6541 fake"
 
-    def configure(self, *_args: object) -> None:
+    def configure(self, *args: object) -> None:
         self.configured = True
+        self.configure_args = args
 
     def start(self) -> None:
         self.started = True
@@ -132,64 +134,87 @@ class OECTProjectTests(unittest.TestCase):
         config = RunConfig()
         self.assertEqual(config.correction_factor, 1.0)
         self.assertEqual(config.feedback_polarity, 1)
+        self.assertEqual(config.drain_limit_a, 0.003)
+        self.assertEqual(config.gate_limit_a, 0.003)
+        self.assertFalse(hasattr(config, "mode"))
         self.assertLess(runner.next_feedback_gate(0.0, -0.5, 0.0, config), 0.0)
 
-    def test_simulation_saves_actual_reference_sign_and_metadata(self) -> None:
+    def test_feedback_acquisition_saves_measured_reference_and_converges_in_both_directions(self) -> None:
+        for polarity in (1, -1):
+            with self.subTest(polarity=polarity), tempfile.TemporaryDirectory() as temp_dir:
+                path = Path(temp_dir) / "short_run.tsv"
+                config = RunConfig(
+                    simulation=True,
+                    feedback_polarity=polarity,
+                    sweep_start_v=-0.05,
+                    sweep_stop_v=-0.05,
+                    sweep_step_v=-0.1,
+                    hold_s=1.0,
+                    delay_s=0,
+                    final_keep_s=0,
+                    sample_interval_s=0.1,
+                    output_file=str(path),
+                )
+                result = runner.run_experiment(config)
+                with path.open(newline="", encoding="utf-8") as stream:
+                    rows = list(csv.DictReader(stream, delimiter="\t"))
+                metadata = json.loads(path.with_suffix(".tsv.meta.json").read_text())
+
+                self.assertGreaterEqual(result.samples, 4)
+                self.assertEqual(len(rows), result.samples)
+                self.assertNotIn("mode", metadata)
+                self.assertIn("reference", metadata["vref_definition"])
+                self.assertEqual(metadata["drain_limit_a"], 0.003)
+                self.assertEqual(metadata["gate_limit_a"], 0.003)
+                self.assertEqual(float(rows[0]["GateV"]), config.gate_initial_v)
+                self.assertLess(float(rows[-1]["GateV"]) * polarity, 0)
+                self.assertLessEqual(abs(float(rows[-1]["Eref"]) + 0.05), config.feedback_tolerance_v)
+                self.assertEqual(rows[-1]["WithinTolerance"], "1")
+                self.assertNotEqual(rows[0]["Vref"], rows[0]["TargetV"])
+                for row in rows:
+                    vref = float(row["Vref"])
+                    self.assertTrue(math.isfinite(vref))
+                    self.assertAlmostEqual(float(row["Eref"]), vref, places=7)
+                    self.assertLess(abs(vref - polarity * 0.82 * float(row["GateV"])), 0.01)
+                    self.assertTrue(row["DMMReadUTC"])
+
+    def test_feedback_steps_are_bounded_and_converge_in_both_directions(self) -> None:
+        for polarity in (1, -1):
+            with self.subTest(polarity=polarity):
+                config = RunConfig(feedback_polarity=polarity)
+                gate = 0.0
+                target_e = -0.5
+                first_step = runner.next_feedback_gate(gate, target_e, 0.0, config)
+                self.assertAlmostEqual(first_step, -polarity * config.feedback_max_step_v)
+                for _ in range(80):
+                    measured_e = polarity * 0.82 * gate
+                    updated = runner.next_feedback_gate(gate, target_e, measured_e, config)
+                    self.assertLessEqual(abs(updated - gate), config.feedback_max_step_v + 1e-12)
+                    self.assertLessEqual(config.gate_min_v, updated)
+                    self.assertGreaterEqual(config.gate_max_v, updated)
+                    gate = updated
+                self.assertLessEqual(abs(target_e - polarity * 0.82 * gate), config.feedback_tolerance_v)
+                limit_gate = config.gate_min_v if polarity == 1 else config.gate_max_v
+                self.assertEqual(
+                    runner.next_feedback_gate(limit_gate, -2.0, polarity * 0.82 * limit_gate, config),
+                    limit_gate,
+                )
+
+    def test_acquisition_passes_default_three_milliamp_limits_to_adcmt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "short_run.tsv"
-            config = RunConfig(
-                simulation=True,
-                mode="gate_monitor",
-                sweep_start_v=-0.2,
-                sweep_stop_v=-0.2,
-                sweep_step_v=-0.1,
-                hold_s=0.35,
-                delay_s=0,
-                final_keep_s=0,
-                sample_interval_s=0.1,
-                output_file=str(path),
-            )
-            result = runner.run_experiment(config)
-            with path.open(newline="", encoding="utf-8") as stream:
-                rows = list(csv.DictReader(stream, delimiter="\t"))
-            metadata = json.loads(path.with_suffix(".tsv.meta.json").read_text())
-
-        self.assertGreaterEqual(result.samples, 2)
-        self.assertEqual(len(rows), result.samples)
-        self.assertEqual(metadata["mode"], "gate_monitor")
-        self.assertIn("Pt", metadata["vref_definition"])
-        for row in rows:
-            vref = float(row["Vref"])
-            gate = float(row["GateV"])
-            e_reference = float(row["ERef"])
-            self.assertTrue(math.isfinite(vref))
-            self.assertAlmostEqual(e_reference, vref, places=7)
-            self.assertGreater(abs(vref - gate), 0.02)
-            self.assertTrue(row["DMMReadUTC"])
-
-    def test_feedback_steps_are_bounded_and_converge_with_same_sign_response(self) -> None:
-        config = RunConfig(
-            mode="pt_feedback",
-            feedback_polarity=1,
-            correction_factor=1.0,
-            feedback_max_step_v=0.02,
-            feedback_tolerance_v=0.005,
-        )
-        gate = 0.0
-        target_e = -0.5
-        for _ in range(80):
-            measured_e = 0.82 * gate
-            updated = runner.next_feedback_gate(gate, target_e, measured_e, config)
-            self.assertLessEqual(abs(updated - gate), config.feedback_max_step_v + 1e-12)
-            self.assertLessEqual(config.gate_min_v, updated)
-            self.assertGreaterEqual(config.gate_max_v, updated)
-            gate = updated
-        self.assertLessEqual(abs(target_e - (0.82 * gate)), config.feedback_tolerance_v)
-        self.assertEqual(
-            runner.next_feedback_gate(config.gate_min_v, -2.0,
-                                      0.82 * config.gate_min_v, config),
-            config.gate_min_v,
-        )
+            adcmt = _ADCMTFake()
+            dmm = _DMMFake()
+            stop = threading.Event()
+            config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.tsv"))
+            with patch.object(runner, "ADCMT6541", return_value=adcmt), patch.object(
+                runner, "DMM6500", return_value=dmm
+            ):
+                result = runner.run_experiment(config, on_sample=lambda _sample: stop.set(), stop_event=stop)
+            self.assertEqual(adcmt.configure_args, (config.vds_v, config.gate_initial_v, 0.003, 0.003, config.sample_interval_s))
+            self.assertEqual(result.samples, 1)
+            self.assertTrue(result.stopped)
+            self.assertEqual(adcmt.shutdown_calls, 1)
+            self.assertTrue(dmm.closed)
 
     def test_dmm_configures_and_rechecks_high_impedance_without_10_megohms(self) -> None:
         meter = instruments.DMM6500("example.invalid")
@@ -297,11 +322,11 @@ class OECTProjectTests(unittest.TestCase):
         self.assertEqual(addresses, [(1, 4), (2, 4), (1, 7), (2, 7)])
         self.assertAlmostEqual(second.nominal_elapsed_s, 0.8)
 
-    def test_gate_change_waits_for_fresh_current_pair(self) -> None:
+    def test_gate_change_keeps_the_configured_sampling_cadence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "two_levels.tsv"
             config = RunConfig(
-                simulation=True, mode="gate_monitor",
+                simulation=True,
                 sweep_start_v=-0.1, sweep_stop_v=-0.2, sweep_step_v=-0.1,
                 hold_s=0.35, delay_s=0, final_keep_s=0,
                 sample_interval_s=0.1, output_file=str(path),
@@ -311,7 +336,10 @@ class OECTProjectTests(unittest.TestCase):
                 rows = list(csv.DictReader(stream, delimiter="\t"))
 
         self.assertEqual({int(row["Stage"]) for row in rows}, {1, 2})
-        self.assertTrue(any(int(row["ADCMTSkipped"]) > 0 for row in rows))
+        times = [float(row["Time"]) for row in rows]
+        gaps = [later - earlier for earlier, later in zip(times, times[1:])]
+        self.assertTrue(gaps)
+        self.assertLess(max(gaps), 0.15)
         for row in rows:
             self.assertLess(abs(float(row["Vref"]) - 0.82 * float(row["GateV"])), 0.01)
 

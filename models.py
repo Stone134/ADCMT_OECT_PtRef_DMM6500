@@ -1,4 +1,4 @@
-"""Validated settings and readings for the Pt-referenced OECT program."""
+"""Validated settings and readings for OECT with reference feedback."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ class RunConfig:
     adcmt_ip: str = "192.168.1.204"
     dmm_ip: str = "192.168.1.103"
     port: int = 5025
-    mode: str = "gate_monitor"  # gate_monitor or pt_feedback
     vds_v: float = -0.01
     sweep_start_v: float = 0.0
     sweep_stop_v: float = -0.8
@@ -25,18 +24,18 @@ class RunConfig:
     delay_s: float = 1.0
     final_keep_s: float = 3600.0
     sample_interval_s: float = 1.0
-    drain_limit_a: float = 0.001
-    gate_limit_a: float = 0.001
+    drain_limit_a: float = 0.003
+    gate_limit_a: float = 0.003
     gate_initial_v: float = 0.0
     gate_min_v: float = -1.5
     gate_max_v: float = 1.5
     correction_factor: float = 1.0
-    # +1 means Vg and ERef move in the same direction. With the default
-    # same-sign convention, decreasing Vg lowers ERef.
+    # +1 means Vg and Eref move in the same direction. With the default
+    # same-sign convention, decreasing Vg lowers Eref.
     feedback_polarity: int = 1
     feedback_max_step_v: float = 0.02
     feedback_tolerance_v: float = 0.005
-    output_file: str = "outputs/oect_pt_reference.tsv"
+    output_file: str = "outputs/oect_reference.tsv"
 
     @property
     def levels(self) -> tuple[float, ...]:
@@ -60,8 +59,6 @@ class RunConfig:
         return path if path.is_absolute() else PROJECT_DIR / path
 
     def validate(self) -> None:
-        if self.mode not in {"gate_monitor", "pt_feedback"}:
-            raise ValueError("Mode must be gate_monitor or pt_feedback")
         if not self.adcmt_ip.strip() or not self.dmm_ip.strip():
             raise ValueError("Both instrument IP addresses are required")
         if not 1 <= self.port <= 65535:
@@ -91,10 +88,6 @@ class RunConfig:
             raise ValueError("Gate bounds must lie within -3 to +3 V")
         if not self.gate_min_v <= self.gate_initial_v <= self.gate_max_v:
             raise ValueError("Initial gate voltage must be inside the gate bounds")
-        if self.mode == "gate_monitor" and any(
-            not self.gate_min_v <= v <= self.gate_max_v for v in self.levels
-        ):
-            raise ValueError("Every gate sweep value must be inside the gate bounds")
         if self.feedback_polarity not in {-1, 1}:
             raise ValueError("Feedback polarity must be +1 or -1")
         if self.correction_factor <= 0 or self.feedback_max_step_v <= 0:
@@ -107,8 +100,8 @@ class RunConfig:
     def metadata(self) -> dict:
         result = asdict(self)
         result["levels_v"] = list(self.levels)
-        result["vref_definition"] = "DMM6500 INPUT HI (Pt) minus INPUT LO (source)"
-        result["e_reference_definition"] = "ERef = Vref = V(Pt) - V(source)"
+        result["vref_definition"] = "DMM6500 INPUT HI (reference) minus INPUT LO (source)"
+        result["e_reference_definition"] = "Eref = Vref = V(reference) - V(source)"
         return result
 
 
