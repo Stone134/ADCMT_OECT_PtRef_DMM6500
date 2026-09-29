@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -33,9 +33,9 @@ class RunConfig:
     # +1 means Vg and Eref move in the same direction. With the default
     # same-sign convention, decreasing Vg lowers Eref.
     feedback_polarity: int = 1
-    feedback_max_step_v: float = 0.02
+    feedback_max_step_v: float = 0.1
     feedback_tolerance_v: float = 0.005
-    output_file: str = "outputs/oect_reference.tsv"
+    output_file: str = "outputs/oect_reference.txt"
 
     @property
     def levels(self) -> tuple[float, ...]:
@@ -96,13 +96,8 @@ class RunConfig:
             raise ValueError("Feedback tolerance cannot be negative")
         if not self.output_file.strip():
             raise ValueError("Choose a raw-data file")
-
-    def metadata(self) -> dict:
-        result = asdict(self)
-        result["levels_v"] = list(self.levels)
-        result["vref_definition"] = "DMM6500 INPUT HI (reference) minus INPUT LO (source)"
-        result["e_reference_definition"] = "Eref = Vref = V(reference) - V(source)"
-        return result
+        if Path(self.output_file).suffix.lower() != ".txt":
+            raise ValueError("Raw-data file must have a .txt extension")
 
 
 @dataclass(frozen=True)

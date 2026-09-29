@@ -76,7 +76,7 @@ deliver, which can prevent the requested voltage from being reached.
 All controls are on the left, with **Connection** at the top and **Raw data**
 directly below it, followed by sweep and feedback settings. The plots are on
 the right. The default raw file is
-`outputs/oect_reference.tsv` inside the project folder.
+`outputs/oect_reference.txt` inside the project folder.
 
 ### Feedback direction
 
@@ -114,12 +114,12 @@ error = target Eref − measured Eref
 gate change = feedback_polarity × Correction factor × error
 ```
 
-It then limits the gate change to **Max change**, which defaults to `0.02 V`,
+It then limits the gate change to **Max change**, which defaults to `0.1 V`,
 and keeps the resulting gate voltage within the configured bounds. For example,
-if measured Eref is −0.30 V and the target is −0.40 V, the error is −0.10 V.
-With Correction factor `1.0`, the default direction requests a −0.10 V gate
-change, but Max change limits that reading's correction to **−0.02 V**. The
-opposite direction would apply **+0.02 V**. Subsequent corrections use fresh
+if measured Eref is −0.30 V and the target is −0.45 V, the error is −0.15 V.
+With Correction factor `1.0`, the default direction requests a −0.15 V gate
+change, but Max change limits that reading's correction to **−0.1 V**. The
+opposite direction would apply **+0.1 V**. Subsequent corrections use fresh
 DMM readings.
 
 Correction factor `1.0` does not guarantee reaching the target in one reading:
@@ -134,38 +134,34 @@ so a 1 s setting remains approximately 1 s even while feedback is changing Vg.
 
 CH1 stays at the configured `Vds`. A delay is included within
 each staircase hold. Unlike the previous program, **raw rows during the delay
-are retained** and marked `settling` so the potential response is visible.
+are retained** so the potential response is visible.
 The last level gets the configured additional final keep time. Stop, a meter
 failure, or a control error leads to a 0 V/standby cleanup attempt on the
 ADCMT.
 
 ## Raw data
 
-The tab-delimited output begins with the five historical columns and adds the
-actual DMM reading:
+The raw output is a tab-delimited text file with exactly these six columns:
 
 ```text
-Time  GateI  GateV  DrainI  DrainV  Vref  Eref  TargetV  Stage  Phase  UTC  DMMReadUTC  ADCMTIndex  ADCMTSampleTime  ADCMTSkipped  WithinTolerance
+Time  GateI  GateV  DrainI  DrainV  Vref
 ```
 
-`GateI` and `DrainI` are ADCMT current measurements. `GateV` and `DrainV`
-are verified source setpoints, not independent measured voltages. `Vref` is
-the **measured** DMM voltage, and `Eref` is the same signed quantity. `TargetV`
-is the desired Eref for that staircase stage. An additional `.meta.json` file
-sits beside the raw file and documents this polarity and all run settings.
+`Time` is elapsed time in seconds. `GateI` and `DrainI` are synchronized ADCMT
+current measurements in amperes. `GateV` and `DrainV` are verified ADCMT source
+setpoints in volts, not independent measured voltages. `Vref` is the DMM6500
+measurement in volts, with the sign `V(reference) − V(source)`.
 
 CH1/CH2 current readings are hardware synchronized by the ADCMT. The DMM
 reading follows those two currents over LAN; it is not hardware simultaneous.
-The file therefore keeps both the ADCMT sample index/time and DMM read time.
-If computer/network work misses an ADCMT sample, `ADCMTSkipped` reports the
-gap rather than fabricating a Vref value for it. After a gate-voltage change,
-the program also discards buffered current pairs that may predate the new
-command; these count toward `ADCMTSkipped` in the next recorded row. It does
-not intentionally discard the entire following sampling interval.
+If computer/network work misses an ADCMT sample, the program records the next
+available current pair and its corresponding DMM reading. After a gate-voltage
+change, it discards any buffered current pair that predates the new command.
+It does not intentionally discard the entire following sampling interval.
 
 ## Before connecting a device
 
-1. In simulation, confirm the sweep, graph labels, Vref/Eref columns, and
+1. In simulation, confirm the sweep, graph labels, Vref column, and
    feedback sign. For live feedback, determine the response direction with a
    small, reversible gate perturbation on a dummy cell or robust sample.
 2. Confirm the two instrument IPs, common-source wiring, DMM FRONT selection,

@@ -322,7 +322,7 @@ class OECTWindow(QtWidgets.QMainWindow):
         progress_row.addStretch(1)
         progress_row.addWidget(self.progress_detail)
         grid.addLayout(progress_row, 1, 0, 1, 2)
-        note = QtWidgets.QLabel("Every row includes measured Vref and Eref (reference − source).")
+        note = QtWidgets.QLabel("Text file: Time, GateI, GateV, DrainI, DrainV, Vref.")
         note.setProperty("muted", True)
         note.setWordWrap(True)
         grid.addWidget(note, 2, 0, 1, 2)
@@ -466,7 +466,7 @@ class OECTWindow(QtWidgets.QMainWindow):
         if not initial.is_absolute():
             initial = PROJECT_DIR / initial
         selected, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Choose raw-data file", str(initial), "Tab-delimited data (*.tsv);;All files (*)"
+            self, "Choose raw-data file", str(initial), "Tab-delimited text (*.txt)"
         )
         if selected:
             self.output.setText(selected)

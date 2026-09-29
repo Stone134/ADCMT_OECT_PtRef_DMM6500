@@ -8,7 +8,6 @@ not represented as if it were acquired by the ADCMT trigger.
 from __future__ import annotations
 
 import csv
-import json
 import math
 import threading
 import time
@@ -25,13 +24,8 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-FIELDS = (
-    # Preserve the five familiar OECT columns first. GateV and DrainV are
-    # verified source setpoints; Vref is the actual Keithley voltage reading.
-    "Time", "GateI", "GateV", "DrainI", "DrainV", "Vref",
-    "Eref", "TargetV", "Stage", "Phase", "UTC", "DMMReadUTC",
-    "ADCMTIndex", "ADCMTSampleTime", "ADCMTSkipped", "WithinTolerance",
-)
+# GateV and DrainV are verified source setpoints; Vref is the DMM reading.
+FIELDS = ("Time", "GateI", "GateV", "DrainI", "DrainV", "Vref")
 
 
 @dataclass(frozen=True)
@@ -42,7 +36,7 @@ class RunResult:
 
 
 class RawDataWriter:
-    def __init__(self, path: Path, config: RunConfig) -> None:
+    def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._file = path.open("w", encoding="utf-8", newline="")
@@ -50,19 +44,6 @@ class RawDataWriter:
         self._writer.writerow(FIELDS)
         self._file.flush()
         self.samples = 0
-        metadata_path = path.with_suffix(path.suffix + ".meta.json")
-        metadata = config.metadata()
-        metadata["started_utc"] = utc_now()
-        metadata["data_columns"] = list(FIELDS)
-        metadata["notes"] = (
-            "Vref is measured by DMM6500 with INPUT HI at the reference electrode and INPUT LO "
-            "at OECT source. Eref = Vref = V(reference) - V(source), following the "
-            "same-sign setting used for this run. ADCMTIndex refers to the latest "
-            "common CH1/CH2 hardware sample; the DMM reading follows it over LAN. "
-            "GateV and DrainV are verified ADCMT voltage source setpoints, not "
-            "independent voltage ADC readings. Settling rows are retained and marked."
-        )
-        metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     @staticmethod
     def _num(value: float) -> str:
@@ -76,16 +57,6 @@ class RawDataWriter:
             self._num(sample.drain_i_a),
             self._num(sample.drain_v),
             self._num(sample.vref_v),
-            self._num(sample.e_reference_v),
-            self._num(sample.target_v),
-            sample.stage_index,
-            sample.phase,
-            sample.utc,
-            sample.dmm_read_utc,
-            sample.adcmt_index,
-            self._num(sample.adcmt_nominal_elapsed_s),
-            sample.adcmt_skipped,
-            int(sample.within_tolerance),
         ))
         self._file.flush()  # preserve each reading even if a long run is interrupted
         self.samples += 1
@@ -232,7 +203,7 @@ def run_experiment(
         adcmt.configure(config.vds_v, gate_v, config.drain_limit_a,
                         config.gate_limit_a, config.sample_interval_s)
         status(f"ADCMT ready: {adcmt_id}")
-        writer = RawDataWriter(config.output_path, config)
+        writer = RawDataWriter(config.output_path)
 
         status("Starting OECT acquisition")
         adcmt.start()

@@ -7,7 +7,6 @@ LAN connection or enable a physical source output.
 from __future__ import annotations
 
 import csv
-import json
 import math
 import tempfile
 import threading
@@ -133,16 +132,20 @@ class OECTProjectTests(unittest.TestCase):
     def test_default_feedback_settings_use_fast_same_sign_correction(self) -> None:
         config = RunConfig()
         self.assertEqual(config.correction_factor, 1.0)
+        self.assertEqual(config.feedback_max_step_v, 0.1)
         self.assertEqual(config.feedback_polarity, 1)
         self.assertEqual(config.drain_limit_a, 0.003)
         self.assertEqual(config.gate_limit_a, 0.003)
         self.assertFalse(hasattr(config, "mode"))
+        self.assertTrue(config.output_file.endswith(".txt"))
+        with self.assertRaisesRegex(ValueError, r"\.txt extension"):
+            RunConfig(output_file="data.tsv").validate()
         self.assertLess(runner.next_feedback_gate(0.0, -0.5, 0.0, config), 0.0)
 
     def test_feedback_acquisition_saves_measured_reference_and_converges_in_both_directions(self) -> None:
         for polarity in (1, -1):
             with self.subTest(polarity=polarity), tempfile.TemporaryDirectory() as temp_dir:
-                path = Path(temp_dir) / "short_run.tsv"
+                path = Path(temp_dir) / "short_run.txt"
                 config = RunConfig(
                     simulation=True,
                     feedback_polarity=polarity,
@@ -155,28 +158,32 @@ class OECTProjectTests(unittest.TestCase):
                     sample_interval_s=0.1,
                     output_file=str(path),
                 )
-                result = runner.run_experiment(config)
+                samples = []
+                result = runner.run_experiment(config, on_sample=samples.append)
                 with path.open(newline="", encoding="utf-8") as stream:
-                    rows = list(csv.DictReader(stream, delimiter="\t"))
-                metadata = json.loads(path.with_suffix(".tsv.meta.json").read_text())
+                    reader = csv.DictReader(stream, delimiter="\t")
+                    self.assertEqual(reader.fieldnames, list(runner.FIELDS))
+                    self.assertEqual(
+                        reader.fieldnames,
+                        ["Time", "GateI", "GateV", "DrainI", "DrainV", "Vref"],
+                    )
+                    rows = list(reader)
 
                 self.assertGreaterEqual(result.samples, 4)
                 self.assertEqual(len(rows), result.samples)
-                self.assertNotIn("mode", metadata)
-                self.assertIn("reference", metadata["vref_definition"])
-                self.assertEqual(metadata["drain_limit_a"], 0.003)
-                self.assertEqual(metadata["gate_limit_a"], 0.003)
+                self.assertEqual(len(samples), result.samples)
+                self.assertEqual(list(Path(temp_dir).iterdir()), [path])
                 self.assertEqual(float(rows[0]["GateV"]), config.gate_initial_v)
                 self.assertLess(float(rows[-1]["GateV"]) * polarity, 0)
-                self.assertLessEqual(abs(float(rows[-1]["Eref"]) + 0.05), config.feedback_tolerance_v)
-                self.assertEqual(rows[-1]["WithinTolerance"], "1")
-                self.assertNotEqual(rows[0]["Vref"], rows[0]["TargetV"])
-                for row in rows:
+                self.assertLessEqual(abs(samples[-1].e_reference_v + 0.05), config.feedback_tolerance_v)
+                self.assertTrue(samples[-1].within_tolerance)
+                self.assertNotEqual(samples[0].vref_v, samples[0].target_v)
+                for row, sample in zip(rows, samples):
                     vref = float(row["Vref"])
                     self.assertTrue(math.isfinite(vref))
-                    self.assertAlmostEqual(float(row["Eref"]), vref, places=7)
+                    self.assertAlmostEqual(sample.e_reference_v, vref, places=7)
                     self.assertLess(abs(vref - polarity * 0.82 * float(row["GateV"])), 0.01)
-                    self.assertTrue(row["DMMReadUTC"])
+                    self.assertTrue(sample.dmm_read_utc)
 
     def test_feedback_steps_are_bounded_and_converge_in_both_directions(self) -> None:
         for polarity in (1, -1):
@@ -205,7 +212,7 @@ class OECTProjectTests(unittest.TestCase):
             adcmt = _ADCMTFake()
             dmm = _DMMFake()
             stop = threading.Event()
-            config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.tsv"))
+            config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.txt"))
             with patch.object(runner, "ADCMT6541", return_value=adcmt), patch.object(
                 runner, "DMM6500", return_value=dmm
             ):
@@ -257,7 +264,7 @@ class OECTProjectTests(unittest.TestCase):
                 dmm = instruments.DMM6500("example.invalid")
                 dmm.io = _DMMIO(**fake_kwargs)
                 config = RunConfig(
-                    simulation=False, output_file=str(Path(temp_dir) / "data.tsv")
+                    simulation=False, output_file=str(Path(temp_dir) / "data.txt")
                 )
                 with patch.object(runner, "ADCMT6541", return_value=adcmt), patch.object(
                     runner, "DMM6500", return_value=dmm
@@ -274,7 +281,7 @@ class OECTProjectTests(unittest.TestCase):
             dmm = instruments.DMM6500("example.invalid")
             io = _DMMIO(impedance="MANUAL")
             dmm.io = io
-            config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.tsv"))
+            config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.txt"))
             with patch.object(runner, "ADCMT6541", return_value=adcmt), patch.object(
                 runner, "DMM6500", return_value=dmm
             ):
@@ -291,7 +298,7 @@ class OECTProjectTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             adcmt = _ADCMTFake()
             dmm = _DMMFake(fail_read=True)
-            config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.tsv"))
+            config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.txt"))
             with patch.object(runner, "ADCMT6541", return_value=adcmt), patch.object(
                 runner, "DMM6500", return_value=dmm
             ):
@@ -324,18 +331,20 @@ class OECTProjectTests(unittest.TestCase):
 
     def test_gate_change_keeps_the_configured_sampling_cadence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "two_levels.tsv"
+            path = Path(temp_dir) / "two_levels.txt"
             config = RunConfig(
                 simulation=True,
                 sweep_start_v=-0.1, sweep_stop_v=-0.2, sweep_step_v=-0.1,
                 hold_s=0.35, delay_s=0, final_keep_s=0,
                 sample_interval_s=0.1, output_file=str(path),
             )
-            runner.run_experiment(config)
+            samples = []
+            runner.run_experiment(config, on_sample=samples.append)
             with path.open(newline="", encoding="utf-8") as stream:
                 rows = list(csv.DictReader(stream, delimiter="\t"))
 
-        self.assertEqual({int(row["Stage"]) for row in rows}, {1, 2})
+        self.assertEqual({sample.stage_index for sample in samples}, {1, 2})
+        self.assertEqual(len(rows), len(samples))
         times = [float(row["Time"]) for row in rows]
         gaps = [later - earlier for earlier, later in zip(times, times[1:])]
         self.assertTrue(gaps)
@@ -349,7 +358,7 @@ class OECTProjectTests(unittest.TestCase):
             dmm = _DMMFake()
             stop = threading.Event()
             config = RunConfig(
-                simulation=False, output_file=str(Path(temp_dir) / "data.tsv"),
+                simulation=False, output_file=str(Path(temp_dir) / "data.txt"),
             )
             with patch.object(runner, "ADCMT6541", return_value=adcmt), patch.object(
                 runner, "DMM6500", return_value=dmm
