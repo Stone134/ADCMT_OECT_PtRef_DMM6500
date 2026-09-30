@@ -179,7 +179,7 @@ def run_experiment(
         config.adcmt_ip, config.port, timeout_s=max(5.0, config.sample_interval_s * 3)
     )
     dmm = SimulatedDMM(adcmt) if config.simulation else DMM6500(
-        config.dmm_ip, config.port, timeout_s=max(5.0, config.sample_interval_s * 3)
+        config.dmm_ip, timeout_s=max(5.0, config.sample_interval_s * 3)
     )
     writer: RawDataWriter | None = None
     started: float | None = None

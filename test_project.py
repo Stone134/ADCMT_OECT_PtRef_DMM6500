@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import csv
 import math
+import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import instruments
 import runner
@@ -129,6 +131,60 @@ class _DMMFake:
 
 
 class OECTProjectTests(unittest.TestCase):
+    def test_dmm_opens_vxi11_visa_resource_and_closes_both_handles(self) -> None:
+        resource = Mock()
+        resource.query.return_value = "Keithley Instruments,DMM6500,FAKE,1.0\n"
+        manager = Mock()
+        manager.open_resource.return_value = resource
+        pyvisa = SimpleNamespace(ResourceManager=Mock(return_value=manager))
+
+        with patch.dict(sys.modules, {"pyvisa": pyvisa}):
+            meter = instruments.DMM6500("192.168.1.103", timeout_s=3)
+            self.assertEqual(meter.connect(), "Keithley Instruments,DMM6500,FAKE,1.0")
+            meter.io.write("*CLS")
+            meter.close()
+
+        pyvisa.ResourceManager.assert_called_once_with("@py")
+        manager.open_resource.assert_called_once_with(
+            "TCPIP0::192.168.1.103::inst0::INSTR"
+        )
+        self.assertEqual(resource.timeout, 3000)
+        self.assertEqual(resource.write_termination, "\n")
+        self.assertEqual(resource.read_termination, "\n")
+        resource.query.assert_called_once_with("*IDN?")
+        resource.write.assert_called_once_with("*CLS")
+        resource.close.assert_called_once()
+        manager.close.assert_called_once()
+
+    def test_dmm_visa_query_error_discards_session(self) -> None:
+        resource = Mock()
+        resource.query.side_effect = TimeoutError("VXI-11 read timeout")
+        manager = Mock()
+        manager.open_resource.return_value = resource
+        pyvisa = SimpleNamespace(ResourceManager=Mock(return_value=manager))
+
+        with patch.dict(sys.modules, {"pyvisa": pyvisa}):
+            meter = instruments.DMM6500("192.168.1.103")
+            with self.assertRaisesRegex(instruments.InstrumentError, "VXI-11 read timeout"):
+                meter.connect()
+
+        self.assertFalse(meter.io.connected)
+        resource.close.assert_called_once()
+        manager.close.assert_called_once()
+
+    def test_connection_probe_uses_adcmt_port_only(self) -> None:
+        with patch.object(instruments, "ADCMT6541") as adcmt_factory, patch.object(
+            instruments, "DMM6500"
+        ) as dmm_factory:
+            adcmt_factory.return_value.connect.return_value = "ADCMT fake"
+            dmm_factory.return_value.connect.return_value = "DMM6500 fake"
+            dmm_factory.return_value.io.query.side_effect = ["SCPI", "FRON"]
+            summary = instruments.probe_links("adcmt.local", "dmm.local", port=6000)
+
+        adcmt_factory.assert_called_once_with("adcmt.local", 6000, timeout_s=3)
+        dmm_factory.assert_called_once_with("dmm.local", timeout_s=3)
+        self.assertIn("DMM6500 fake", summary)
+
     def test_default_feedback_settings_use_fast_same_sign_correction(self) -> None:
         config = RunConfig()
         self.assertEqual(config.correction_factor, 1.0)
@@ -215,8 +271,9 @@ class OECTProjectTests(unittest.TestCase):
             config = RunConfig(simulation=False, output_file=str(Path(temp_dir) / "data.txt"))
             with patch.object(runner, "ADCMT6541", return_value=adcmt), patch.object(
                 runner, "DMM6500", return_value=dmm
-            ):
+            ) as dmm_factory:
                 result = runner.run_experiment(config, on_sample=lambda _sample: stop.set(), stop_event=stop)
+            dmm_factory.assert_called_once_with(config.dmm_ip, timeout_s=5.0)
             self.assertEqual(adcmt.configure_args, (config.vds_v, config.gate_initial_v, 0.003, 0.003, config.sample_interval_s))
             self.assertEqual(result.samples, 1)
             self.assertTrue(result.stopped)

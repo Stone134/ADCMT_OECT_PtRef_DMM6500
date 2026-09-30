@@ -216,6 +216,7 @@ class OECTWindow(QtWidgets.QMainWindow):
 
         self.adcmt_ip = QtWidgets.QLineEdit(RunConfig.adcmt_ip)
         self.dmm_ip = QtWidgets.QLineEdit(RunConfig.dmm_ip)
+        self.dmm_ip.setToolTip("DMM6500 VXI-11 VISA: TCPIP0::<IP>::inst0::INSTR")
         self.port = QtWidgets.QSpinBox()
         self.port.setRange(1, 65535)
         self.port.setValue(RunConfig.port)
@@ -224,7 +225,7 @@ class OECTWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.adcmt_ip, 1, 1)
         grid.addWidget(QtWidgets.QLabel("DMM6500 IP"), 1, 2)
         grid.addWidget(self.dmm_ip, 1, 3)
-        grid.addWidget(QtWidgets.QLabel("TCP port"), 2, 0)
+        grid.addWidget(QtWidgets.QLabel("ADCMT TCP port"), 2, 0)
         grid.addWidget(self.port, 2, 1)
         self.test_button = QtWidgets.QPushButton("Test both connections")
         self.test_button.setProperty("secondary", True)
@@ -234,6 +235,9 @@ class OECTWindow(QtWidgets.QMainWindow):
         note.setProperty("muted", True)
         note.setWordWrap(True)
         grid.addWidget(note, 3, 0, 1, 4)
+        visa_note = QtWidgets.QLabel("DMM6500 LAN: VXI-11 VISA • inst0::INSTR")
+        visa_note.setProperty("muted", True)
+        grid.addWidget(visa_note, 4, 0, 1, 4)
         return group
 
     def _sweep_card(self) -> QtWidgets.QWidget:

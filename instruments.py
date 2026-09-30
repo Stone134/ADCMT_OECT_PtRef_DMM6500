@@ -48,7 +48,7 @@ def _first_float(response: str, *, label: str) -> float:
 
 
 class _LineSocket:
-    """LF-terminated, single-command raw TCP transport shared by both devices."""
+    """LF-terminated, single-command raw TCP transport for the ADCMT."""
 
     def __init__(self, host: str, port: int, timeout_s: float) -> None:
         if not host.strip() or not 1 <= port <= 65535 or timeout_s <= 0:
@@ -120,6 +120,82 @@ class _LineSocket:
         finally:
             if self._sock is sock:
                 sock.settimeout(original_timeout)
+
+
+class _VisaInstrument:
+    """DMM6500 VXI-11 session addressed by its LAN VISA resource name."""
+
+    def __init__(self, host: str, timeout_s: float) -> None:
+        host = host.strip()
+        if not host or not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise InstrumentError("Invalid DMM6500 address or VISA timeout")
+        self.resource_name = f"TCPIP0::{host}::inst0::INSTR"
+        self.timeout_s = timeout_s
+        self._manager = None
+        self._resource = None
+
+    @property
+    def connected(self) -> bool:
+        return self._resource is not None
+
+    def connect(self) -> None:
+        if self.connected:
+            raise InstrumentError(f"Already connected to {self.resource_name}")
+        try:
+            import pyvisa
+        except ImportError as exc:
+            raise InstrumentError(
+                "DMM6500 VISA support is missing; install requirements.txt"
+            ) from exc
+        try:
+            self._manager = pyvisa.ResourceManager("@py")
+            self._resource = self._manager.open_resource(self.resource_name)
+            self._resource.timeout = max(1, math.ceil(self.timeout_s * 1000))
+            self._resource.write_termination = "\n"
+            self._resource.read_termination = "\n"
+        except Exception as exc:
+            self.close()
+            raise InstrumentError(
+                f"Cannot open DMM6500 VISA resource {self.resource_name}: {exc}. "
+                "Check the meter's LAN IP and VXI-11 network access"
+            ) from exc
+
+    def close(self) -> None:
+        resource, self._resource = self._resource, None
+        manager, self._manager = self._manager, None
+        for handle in (resource, manager):
+            if handle is not None:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+
+    def _check_command(self, command: str) -> None:
+        if not command or any(c in command for c in "\r\n"):
+            raise InstrumentError("Instrument command must be one nonempty line")
+        if not self.connected:
+            raise InstrumentError(f"Not connected to {self.resource_name}")
+
+    def write(self, command: str) -> None:
+        self._check_command(command)
+        try:
+            self._resource.write(command)
+        except Exception as exc:
+            self.close()
+            raise InstrumentError(
+                f"Failed sending {command!r} to {self.resource_name}: {exc}"
+            ) from exc
+
+    def query(self, command: str) -> str:
+        self._check_command(command)
+        try:
+            return self._resource.query(command).strip()
+        except Exception as exc:
+            # A timed-out query may leave a stale reply; discard the session.
+            self.close()
+            raise InstrumentError(
+                f"Failed reading {command!r} from {self.resource_name}: {exc}"
+            ) from exc
 
 
 class ADCMT6541:
@@ -416,8 +492,8 @@ class ADCMT6541:
 class DMM6500:
     """Passive reference-minus-source DC-voltage reader using FRONT terminals."""
 
-    def __init__(self, host: str, port: int = 5025, timeout_s: float = 5) -> None:
-        self.io = _LineSocket(host, port, timeout_s)
+    def __init__(self, host: str, timeout_s: float = 5) -> None:
+        self.io = _VisaInstrument(host, timeout_s)
         self.identity = ""
         self._configured = False
 
@@ -541,7 +617,7 @@ class DMM6500:
 def probe_links(adcmt_host: str, dmm_host: str, port: int = 5025) -> str:
     """Read instrument identities and DMM state without enabling any output."""
     adcmt = ADCMT6541(adcmt_host, port, timeout_s=3)
-    dmm = DMM6500(dmm_host, port, timeout_s=3)
+    dmm = DMM6500(dmm_host, timeout_s=3)
     try:
         adcmt_id = adcmt.connect()
         dmm_id = dmm.connect()

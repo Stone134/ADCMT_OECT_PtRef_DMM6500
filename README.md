@@ -47,10 +47,14 @@ ADCMT outputs if verification or a reading fails. A meter reset may revert to
 checks saved Relative, Math, averaging, and limit functions so `Vref` is the
 unmodified DC-voltage reading.
 
-The provided photograph shows DMM6500 `192.168.1.103` and raw socket port
+The DMM6500 uses a VXI-11 VISA instrument session at
+`TCPIP0::<DMM6500 IP>::inst0::INSTR`. Enter its IP address in the GUI; the
+program builds this resource name automatically. The DMM6500 does **not** use
+the GUI's TCP port. That port is for the ADCMT raw socket only, with default
 `5025`. The ADCMT address defaults to `192.168.1.204` from the earlier OECT
 project; change it in the GUI if your instrument uses another address. Both
-instruments and the computer must be reachable on the same LAN. The photograph
+instruments and the computer must be reachable on the same LAN. On the DMM6500,
+check the assigned IP under **Menu → Communication → LAN**. The photograph
 does not establish the computer's network settings.
 
 ## Run the program
@@ -60,6 +64,10 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python gui.py
 ```
+
+For an existing `.venv`, run `.venv/bin/python -m pip install -r requirements.txt`
+again to add PyVISA and its Python VXI-11 backend. This backend opens a known
+instrument address directly; VISA device discovery is not required.
 
 Or double-click `launch_gui.command` on macOS. **Simulation is selected when
 the GUI opens**; it uses no network connection and cannot energize an output.

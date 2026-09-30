@@ -15,6 +15,7 @@ class RunConfig:
     simulation: bool = True
     adcmt_ip: str = "192.168.1.204"
     dmm_ip: str = "192.168.1.103"
+    # Raw TCP port for ADCMT only; DMM6500 uses TCPIP0::<IP>::inst0::INSTR.
     port: int = 5025
     vds_v: float = -0.01
     sweep_start_v: float = 0.0

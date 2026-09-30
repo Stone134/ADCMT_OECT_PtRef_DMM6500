@@ -1,4 +1,5 @@
 PyQt5>=5.15,<6
 pyqtgraph>=0.13,<1
 numpy>=1.26,<3
-
+pyvisa>=1.14,<1.15
+pyvisa-py>=0.7.2,<0.8
