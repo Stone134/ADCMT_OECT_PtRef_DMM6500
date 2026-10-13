@@ -121,6 +121,7 @@ class OECTWindow(QtWidgets.QMainWindow):
         self._pending_close = False
         self._sample_count = 0
         self._duration_s = 1.0
+        self._active_mode = "feedback"
         self._plot_data: dict[str, list[float]] = {
             "time": [], "id": [], "vg": [], "vref": [], "target_ref": [],
         }
@@ -141,6 +142,7 @@ class OECTWindow(QtWidgets.QMainWindow):
 
         self._apply_style()
         self._simulation_changed(True)
+        self._mode_changed()
 
     def _header(self) -> QtWidgets.QWidget:
         card = QtWidgets.QFrame()
@@ -243,6 +245,15 @@ class OECTWindow(QtWidgets.QMainWindow):
     def _sweep_card(self) -> QtWidgets.QWidget:
         self.sweep_group, grid = self._group_grid("Target Eref sweep")
         defaults = RunConfig()
+        self.measurement_mode = QtWidgets.QComboBox()
+        self.measurement_mode.addItem("Reference feedback • sweep Eref target", "feedback")
+        self.measurement_mode.addItem("Vref monitor • sweep Vg directly", "monitor")
+        self.measurement_mode.currentIndexChanged.connect(self._mode_changed)
+        grid.addWidget(self._row_field(QtWidgets.QLabel("Mode"), self.measurement_mode), 0, 0, 1, 2)
+        self.mode_note = QtWidgets.QLabel()
+        self.mode_note.setProperty("muted", True)
+        self.mode_note.setWordWrap(True)
+        grid.addWidget(self.mode_note, 1, 0, 1, 2)
         self.vds = spin(-3, 3, defaults.vds_v, 0.01, 4, " V")
         self.sweep_start = spin(-3, 3, defaults.sweep_start_v, 0.1, 4, " V")
         self.sweep_stop = spin(-3, 3, defaults.sweep_stop_v, 0.1, 4, " V")
@@ -254,23 +265,42 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.start_label = QtWidgets.QLabel("Eref initial")
         self.stop_label = QtWidgets.QLabel("Eref final")
         self.step_label = QtWidgets.QLabel("Eref step")
+        self.sweep_pattern = QtWidgets.QComboBox()
+        self.sweep_pattern.addItem("One way", "one_way")
+        self.sweep_pattern.addItem("Back and forth", "back_and_forth")
+        self.sweep_pattern.setToolTip("One way ends at final. Back and forth returns to initial each cycle.")
+        self.sweep_pattern.currentIndexChanged.connect(self._sweep_pattern_changed)
+        self.sweep_cycles = QtWidgets.QSpinBox()
+        self.sweep_cycles.setRange(1, 1000)
+        self.sweep_cycles.setValue(defaults.sweep_cycles)
+        self.sweep_cycles.setToolTip("One cycle goes from initial to final and back to initial.")
+        self.sweep_cycles.setMinimumWidth(112)
         fields = (
             ((QtWidgets.QLabel("Vds"), self.vds), (QtWidgets.QLabel("Period"), self.hold)),
             ((self.start_label, self.sweep_start), (QtWidgets.QLabel("Delay"), self.delay)),
-            ((self.stop_label, self.sweep_stop), (QtWidgets.QLabel("Keep at final"), self.final_keep)),
+            ((self.stop_label, self.sweep_stop), (QtWidgets.QLabel("Keep at end"), self.final_keep)),
             ((self.step_label, self.sweep_step), (QtWidgets.QLabel("Read interval"), self.interval)),
+            ((QtWidgets.QLabel("Sweep"), self.sweep_pattern), (QtWidgets.QLabel("Cycles"), self.sweep_cycles)),
         )
         for row, pair in enumerate(fields):
             for column, (caption, control) in enumerate(pair):
-                grid.addWidget(self._row_field(caption, control), row, column)
+                grid.addWidget(self._row_field(caption, control), row + 2, column)
+        cycle_note = QtWidgets.QLabel(
+            "Back and forth: each cycle returns to initial; turnarounds occur once. "
+            "Keep at end adds time after the final level."
+        )
+        cycle_note.setProperty("muted", True)
+        cycle_note.setWordWrap(True)
+        grid.addWidget(cycle_note, len(fields) + 2, 0, 1, 2)
         note = QtWidgets.QLabel("Delay is inside each period. Drain and gate current limits: 0.003 A each.")
         note.setProperty("muted", True)
         note.setWordWrap(True)
-        grid.addWidget(note, len(fields), 0, 1, 2)
+        grid.addWidget(note, len(fields) + 3, 0, 1, 2)
         return self.sweep_group
 
     def _feedback_card(self) -> QtWidgets.QWidget:
         group, grid = self._group_grid("Gate bounds and reference feedback")
+        self.feedback_group = group
         defaults = RunConfig()
         self.gate_min = spin(-3, 3, defaults.gate_min_v, 0.1, 4, " V")
         self.gate_max = spin(-3, 3, defaults.gate_max_v, 0.1, 4, " V")
@@ -299,6 +329,7 @@ class OECTWindow(QtWidgets.QMainWindow):
         note = QtWidgets.QLabel(
             "Eref = Vref = V(reference) − V(source). The gate adjusts to follow the Eref target."
         )
+        self.feedback_note = note
         note.setProperty("muted", True)
         note.setWordWrap(True)
         grid.addWidget(note, 4, 0, 1, 2)
@@ -365,7 +396,7 @@ class OECTWindow(QtWidgets.QMainWindow):
             plot.setClipToView(True)
             self.plots[key] = plot
             if key == "vref":
-                plot.addLegend(offset=(12, 10))
+                self.reference_legend = plot.addLegend(offset=(12, 10))
             self.curves[key] = plot.plot(
                 pen=pg.mkPen(color, width=2),
                 connect="finite",
@@ -461,7 +492,41 @@ class OECTWindow(QtWidgets.QMainWindow):
             "background: #FFF0D9; color: #785318;"
         )
         self.status_label.setText(
-            "Ready • simulation mode" if checked else "Ready • verify reference wiring and gate direction"
+            "Ready • simulation mode" if checked else
+            ("Ready • verify reference wiring and gate direction"
+             if self.measurement_mode.currentData() == "feedback" else
+             "Ready • verify reference wiring and gate bounds")
+        )
+
+    def _mode_changed(self, _index: int | None = None) -> None:
+        feedback = self.measurement_mode.currentData() == "feedback"
+        self.sweep_group.setTitle("Target Eref sweep" if feedback else "Programmed Vg sweep")
+        for label, quantity in ((self.start_label, "initial"),
+                                (self.stop_label, "final"),
+                                (self.step_label, "step")):
+            label.setText(f"{'Eref' if feedback else 'Vg'} {quantity}")
+        self.mode_note.setText(
+            "The DMM reading corrects Vg toward each Eref target."
+            if feedback else
+            "Vg follows the programmed sweep; Vref is measured and recorded without feedback."
+        )
+        self.feedback_group.setTitle(
+            "Gate bounds and reference feedback" if feedback else "Gate voltage bounds"
+        )
+        self.feedback_note.setText(
+            "Eref = Vref = V(reference) − V(source). The gate adjusts to follow the Eref target."
+            if feedback else
+            "The sweep directly sets Vg inside these bounds. The DMM reading does not change Vg."
+        )
+        editable = self.worker is None
+        for widget in self.feedback_controls:
+            widget.setEnabled(editable and feedback)
+        self.curves["target_ref"].setVisible(feedback)
+        self.reference_legend.setVisible(feedback)
+
+    def _sweep_pattern_changed(self, _index: int | None = None) -> None:
+        self.sweep_cycles.setEnabled(
+            self.worker is None and self.sweep_pattern.currentData() == "back_and_forth"
         )
 
     def _browse_output(self) -> None:
@@ -478,6 +543,7 @@ class OECTWindow(QtWidgets.QMainWindow):
     def _config(self) -> RunConfig:
         config = RunConfig(
             simulation=self.simulation.isChecked(),
+            mode=self.measurement_mode.currentData(),
             adcmt_ip=self.adcmt_ip.text().strip(),
             dmm_ip=self.dmm_ip.text().strip(),
             port=self.port.value(),
@@ -485,6 +551,8 @@ class OECTWindow(QtWidgets.QMainWindow):
             sweep_start_v=self.sweep_start.value(),
             sweep_stop_v=self.sweep_stop.value(),
             sweep_step_v=self.sweep_step.value(),
+            sweep_pattern=self.sweep_pattern.currentData(),
+            sweep_cycles=self.sweep_cycles.value(),
             hold_s=self.hold.value(),
             delay_s=self.delay.value(),
             final_keep_s=self.final_keep.value(),
@@ -529,6 +597,7 @@ class OECTWindow(QtWidgets.QMainWindow):
             if answer != QtWidgets.QMessageBox.Yes:
                 return
         self._clear_plots()
+        self._active_mode = config.mode
         self._duration_s = config.duration_s
         self._last_result = None
         self.worker = AcquisitionWorker(config, self)
@@ -556,17 +625,21 @@ class OECTWindow(QtWidgets.QMainWindow):
         data["id"].append(sample.drain_i_a)
         data["vg"].append(sample.gate_v)
         data["vref"].append(sample.vref_v)
-        data["target_ref"].append(sample.target_v)
+        if self._active_mode == "feedback":
+            data["target_ref"].append(sample.target_v)
         self.curves["id"].setData(data["time"], data["id"])
         self.curves["vg"].setData(data["time"], data["vg"], stepMode="right")
         self.curves["vref"].setData(data["time"], data["vref"])
-        self.curves["target_ref"].setData(data["time"], data["target_ref"], stepMode="right")
+        if self._active_mode == "feedback":
+            self.curves["target_ref"].setData(data["time"], data["target_ref"], stepMode="right")
         self._sample_count += 1
         self.sample_label.setText(f"{self._sample_count} samples")
         self.progress.setValue(min(99, max(0, int(100 * sample.elapsed_s / self._duration_s))))
         self.progress_detail.setText(f"Level {sample.stage_index} • {sample.phase}")
         self.status_label.setText(
-            f"Vref / Eref {sample.vref_v:+.4g} V  •  target {sample.target_v:+.4g} V"
+            f"Vref {sample.vref_v:+.4g} V  •  "
+            f"{'Eref target' if self._active_mode == 'feedback' else 'programmed Vg'} "
+            f"{sample.target_v:+.4g} V"
         )
 
     @QtCore.pyqtSlot(str)
@@ -601,12 +674,12 @@ class OECTWindow(QtWidgets.QMainWindow):
         for widget in (
             self.vds, self.sweep_start, self.sweep_stop, self.sweep_step,
             self.hold, self.delay, self.final_keep, self.interval,
-            self.gate_min, self.gate_max,
+            self.gate_min, self.gate_max, self.measurement_mode, self.sweep_pattern,
             self.output, self.browse_button,
         ):
             widget.setEnabled(not running)
-        for widget in self.feedback_controls:
-            widget.setEnabled(not running)
+        self._mode_changed()
+        self._sweep_pattern_changed()
         live_editable = not running and not self.simulation.isChecked()
         for widget in (self.adcmt_ip, self.dmm_ip, self.port, self.test_button):
             widget.setEnabled(live_editable)

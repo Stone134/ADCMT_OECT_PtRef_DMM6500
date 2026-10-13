@@ -73,20 +73,42 @@ Or double-click `launch_gui.command` on macOS. **Simulation is selected when
 the GUI opens**; it uses no network connection and cannot energize an output.
 Use **Test connections** to query instrument identities before a live run.
 
-The program always runs reference feedback. The staircase values are targets
-for `Eref = Vref`. After each DMM reading, a bounded proportional update changes
-CH2 gate voltage to approach the target. The controller enforces adjustable
-gate-voltage bounds and a maximum change per reading. Drain and gate current
+Select one of two measurement modes in the GUI:
+
+| Mode | Sweep values mean | What happens to CH2 gate voltage |
+| --- | --- | --- |
+| Reference feedback | Desired `Eref = Vref` | The program uses each DMM reading to correct Vg toward the target, within the configured bounds and maximum change per reading. |
+| Gate sweep + Vref monitor | Programmed `Vg` | The program sets each gate voltage directly and records Vref. Vref is **never used to correct Vg**. |
+
+Both modes retain the six raw-data columns described below. Drain and gate current
 compliance are each **0.003 A (3 mA)** by default; the GUI fixes these values
 and has no current-limit controls. Compliance limits the current the ADCMT can
 deliver, which can prevent the requested voltage from being reached.
 
+The sweep can be **one way** (initial to final, inclusive) or **back and forth**.
+For back-and-forth sweeps, `Cycles` is the number of complete trips from the
+initial value to the final value and back. The turnarounds are recorded once,
+without repeating a voltage at the same endpoint. For example, initial −0.4 V,
+final −0.6 V, step −0.1 V, and 3 cycles produce:
+
+```text
+−0.4, −0.5, −0.6, −0.5, −0.4, −0.5, −0.6, −0.5, −0.4, −0.5, −0.6, −0.5, −0.4 V
+```
+
+In reference feedback mode these are Eref targets. In Vref monitor mode they
+are programmed Vg values. `Period` applies to every value in this sequence,
+and `Keep at end` adds time after the last value (the initial value when a
+back-and-forth sweep ends).
+
 All controls are on the left, with **Connection** at the top and **Raw data**
-directly below it, followed by sweep and feedback settings. The plots are on
-the right. The default raw file is
+directly below it, followed by sweep and gate settings. The plots are on the
+right. The default raw file is
 `outputs/oect_reference.txt` inside the project folder.
 
 ### Feedback direction
+
+This section applies to **Reference feedback** mode. The monitor mode does
+not use this setting.
 
 **Direction** tells the controller which gate-voltage change lowers the measured
 Eref in your cell. The minus or plus describes a change in Vg, not whether the
@@ -143,7 +165,7 @@ so a 1 s setting remains approximately 1 s even while feedback is changing Vg.
 CH1 stays at the configured `Vds`. A delay is included within
 each staircase hold. Unlike the previous program, **raw rows during the delay
 are retained** so the potential response is visible.
-The last level gets the configured additional final keep time. Stop, a meter
+The last level gets the configured additional keep time. Stop, a meter
 failure, or a control error leads to a 0 V/standby cleanup attempt on the
 ADCMT.
 
@@ -169,9 +191,10 @@ It does not intentionally discard the entire following sampling interval.
 
 ## Before connecting a device
 
-1. In simulation, confirm the sweep, graph labels, Vref column, and
-   feedback sign. For live feedback, determine the response direction with a
-   small, reversible gate perturbation on a dummy cell or robust sample.
+1. In simulation, confirm both modes, the sweep direction and cycle count,
+   graph labels, and Vref column. For live feedback, determine the response
+   direction with a small, reversible gate perturbation on a dummy cell or
+   robust sample.
 2. Confirm the two instrument IPs, common-source wiring, DMM FRONT selection,
    and that the reference is separate from the gate electrode. Check the
    displayed gate bounds and ensure that the fixed 3 mA drain and gate current

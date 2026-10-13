@@ -1,4 +1,4 @@
-"""Validated settings and readings for OECT with reference feedback."""
+"""Validated settings and readings for OECT reference feedback or monitoring."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ PROJECT_DIR = Path(__file__).resolve().parent
 @dataclass(frozen=True)
 class RunConfig:
     simulation: bool = True
+    mode: str = "feedback"  # feedback: sweep Eref target; monitor: sweep Vg and record Vref
     adcmt_ip: str = "192.168.1.204"
     dmm_ip: str = "192.168.1.103"
     # Raw TCP port for ADCMT only; DMM6500 uses TCPIP0::<IP>::inst0::INSTR.
@@ -21,6 +22,8 @@ class RunConfig:
     sweep_start_v: float = 0.0
     sweep_stop_v: float = -0.8
     sweep_step_v: float = -0.1
+    sweep_pattern: str = "one_way"
+    sweep_cycles: int = 1
     hold_s: float = 60.0
     delay_s: float = 1.0
     final_keep_s: float = 3600.0
@@ -40,6 +43,10 @@ class RunConfig:
 
     @property
     def levels(self) -> tuple[float, ...]:
+        if self.sweep_pattern not in {"one_way", "back_and_forth"}:
+            raise ValueError("Sweep pattern must be one way or back and forth")
+        if isinstance(self.sweep_cycles, bool) or not isinstance(self.sweep_cycles, int) or self.sweep_cycles < 1:
+            raise ValueError("Cycles must be a positive whole number")
         start, stop, step = self.sweep_start_v, self.sweep_stop_v, self.sweep_step_v
         if not all(math.isfinite(x) for x in (start, stop, step)):
             raise ValueError("Sweep values must be finite")
@@ -48,7 +55,15 @@ class RunConfig:
         n = int(round((stop - start) / step)) if start != stop else 0
         if n < 0 or n > 1000 or not math.isclose(start + n * step, stop, abs_tol=1e-8):
             raise ValueError("Sweep must reach the final value in at most 1000 steps")
-        return tuple(round(start + i * step, 10) for i in range(n + 1))
+        outward = tuple(round(start + i * step, 10) for i in range(n + 1))
+        if self.sweep_pattern == "one_way" or n == 0:
+            return outward
+        if 2 * n * self.sweep_cycles + 1 > 10_001:
+            raise ValueError("Back-and-forth sweep cannot exceed 10001 levels")
+        # Each cycle goes initial → final → initial. Omit the endpoint already
+        # present at each turn, so cycle=3 and n=2 produces 13 levels.
+        one_cycle = outward[1:] + outward[-2::-1]
+        return (outward[0],) + one_cycle * self.sweep_cycles
 
     @property
     def duration_s(self) -> float:
@@ -60,11 +75,13 @@ class RunConfig:
         return path if path.is_absolute() else PROJECT_DIR / path
 
     def validate(self) -> None:
+        if self.mode not in {"feedback", "monitor"}:
+            raise ValueError("Mode must be reference feedback or Vref monitor")
         if not self.adcmt_ip.strip() or not self.dmm_ip.strip():
             raise ValueError("Both instrument IP addresses are required")
         if not 1 <= self.port <= 65535:
             raise ValueError("Port must be between 1 and 65535")
-        _ = self.levels
+        levels = self.levels
         numeric = (
             self.vds_v, self.hold_s, self.delay_s, self.final_keep_s,
             self.sample_interval_s, self.drain_limit_a, self.gate_limit_a,
@@ -87,8 +104,10 @@ class RunConfig:
             raise ValueError("Vds must be within the ADCMT 3 V source range")
         if not -3 <= self.gate_min_v < self.gate_max_v <= 3:
             raise ValueError("Gate bounds must lie within -3 to +3 V")
-        if not self.gate_min_v <= self.gate_initial_v <= self.gate_max_v:
+        if self.mode == "feedback" and not self.gate_min_v <= self.gate_initial_v <= self.gate_max_v:
             raise ValueError("Initial gate voltage must be inside the gate bounds")
+        if self.mode == "monitor" and not all(self.gate_min_v <= level <= self.gate_max_v for level in levels):
+            raise ValueError("Every programmed Vg level must be inside the gate bounds")
         if self.feedback_polarity not in {-1, 1}:
             raise ValueError("Feedback polarity must be +1 or -1")
         if self.correction_factor <= 0 or self.feedback_max_step_v <= 0:
@@ -118,4 +137,4 @@ class Sample:
     adcmt_nominal_elapsed_s: float
     adcmt_skipped: int
     dmm_read_utc: str
-    within_tolerance: bool
+    within_tolerance: bool | None

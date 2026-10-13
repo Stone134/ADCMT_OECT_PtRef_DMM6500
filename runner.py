@@ -165,12 +165,14 @@ def run_experiment(
     on_status: Callable[[str], None] | None = None,
     stop_event: threading.Event | None = None,
 ) -> RunResult:
-    """Run an Eref target staircase using bounded gate-voltage feedback.
+    """Run an Eref target or direct Vg staircase while measuring Vref.
 
     Eref uses the DMM Vref sign: V(reference)−V(source). The selected response
-    direction determines which gate adjustment reduces the target error.
+    direction determines which gate adjustment reduces the target error in
+    feedback mode. In monitor mode the DMM reading never changes Vg.
     """
     config.validate()
+    levels = config.levels
     stop = stop_event or threading.Event()
     status = on_status or (lambda _message: None)
     report = on_sample or (lambda _sample: None)
@@ -183,7 +185,7 @@ def run_experiment(
     )
     writer: RawDataWriter | None = None
     started: float | None = None
-    gate_v = config.gate_initial_v
+    gate_v = config.gate_initial_v if config.mode == "feedback" else levels[0]
     saturated_count = 0
     stopped = False
     failure: Exception | None = None
@@ -208,7 +210,6 @@ def run_experiment(
         status("Starting OECT acquisition")
         adcmt.start()
         started = time.monotonic()
-        levels = config.levels
         stage_index = 0
         stage_start = started
         stage_end = stage_start + config.hold_s + (config.final_keep_s if len(levels) == 1 else 0)
@@ -227,8 +228,12 @@ def run_experiment(
                 last_target = levels[stage_index]
                 stage_has_sample = False
                 saturated_count = 0
+                if config.mode == "monitor":
+                    gate_v = adcmt.set_gate(last_target)
+                    gate_changed_at = time.monotonic()
                 status(f"Level {stage_index + 1}/{len(levels)}: "
-                       f"target Eref {last_target:+.4f} V")
+                       f"{'target Eref' if config.mode == 'feedback' else 'programmed Vg'} "
+                       f"{last_target:+.4f} V")
 
             pair = adcmt.read_next(timeout_s=max(5.0, config.sample_interval_s * 3))
             if stop.is_set():
@@ -268,25 +273,27 @@ def run_experiment(
                 adcmt_index=pair.index,
                 adcmt_nominal_elapsed_s=pair.nominal_elapsed_s,
                 adcmt_skipped=pair.skipped + discarded_since_row, dmm_read_utc=dmm_time,
-                within_tolerance=abs(last_target - e_reference) <= config.feedback_tolerance_v,
+                within_tolerance=(abs(last_target - e_reference) <= config.feedback_tolerance_v
+                                  if config.mode == "feedback" else None),
             )
             writer.write(sample)
             discarded_since_row = 0
             stage_has_sample = True
             report(sample)
-            new_gate_v = next_feedback_gate(gate_v, last_target,
-                                            e_reference, config)
-            if not math.isclose(new_gate_v, gate_v, abs_tol=1e-12):
-                gate_v = adcmt.set_gate(new_gate_v)
-                gate_changed_at = time.monotonic()
-            at_limit = (math.isclose(gate_v, config.gate_min_v, abs_tol=1e-8) or
-                        math.isclose(gate_v, config.gate_max_v, abs_tol=1e-8))
-            if at_limit and abs(last_target - e_reference) > max(0.05, 2 * config.feedback_tolerance_v):
-                saturated_count += 1
-                if saturated_count >= 10:
-                    raise RuntimeError("Feedback could not reach target before the gate limit; outputs stopped")
-            else:
-                saturated_count = 0
+            if config.mode == "feedback":
+                new_gate_v = next_feedback_gate(gate_v, last_target,
+                                                e_reference, config)
+                if not math.isclose(new_gate_v, gate_v, abs_tol=1e-12):
+                    gate_v = adcmt.set_gate(new_gate_v)
+                    gate_changed_at = time.monotonic()
+                at_limit = (math.isclose(gate_v, config.gate_min_v, abs_tol=1e-8) or
+                            math.isclose(gate_v, config.gate_max_v, abs_tol=1e-8))
+                if at_limit and abs(last_target - e_reference) > max(0.05, 2 * config.feedback_tolerance_v):
+                    saturated_count += 1
+                    if saturated_count >= 10:
+                        raise RuntimeError("Feedback could not reach target before the gate limit; outputs stopped")
+                else:
+                    saturated_count = 0
         stopped = stopped or stop.is_set()
         return RunResult(config.output_path, writer.samples, stopped)
     except Exception as exc:

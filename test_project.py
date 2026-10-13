@@ -192,11 +192,95 @@ class OECTProjectTests(unittest.TestCase):
         self.assertEqual(config.feedback_polarity, 1)
         self.assertEqual(config.drain_limit_a, 0.003)
         self.assertEqual(config.gate_limit_a, 0.003)
-        self.assertFalse(hasattr(config, "mode"))
+        self.assertEqual(config.mode, "feedback")
+        self.assertEqual(config.sweep_pattern, "one_way")
         self.assertTrue(config.output_file.endswith(".txt"))
         with self.assertRaisesRegex(ValueError, r"\.txt extension"):
             RunConfig(output_file="data.tsv").validate()
         self.assertLess(runner.next_feedback_gate(0.0, -0.5, 0.0, config), 0.0)
+
+    def test_back_and_forth_sweep_matches_three_cycle_example(self) -> None:
+        expected = (-0.4, -0.5, -0.6, -0.5, -0.4,
+                    -0.5, -0.6, -0.5, -0.4,
+                    -0.5, -0.6, -0.5, -0.4)
+        for mode in ("feedback", "monitor"):
+            with self.subTest(mode=mode):
+                config = RunConfig(
+                    mode=mode, sweep_start_v=-0.4, sweep_stop_v=-0.6,
+                    sweep_step_v=-0.1, sweep_pattern="back_and_forth", sweep_cycles=3,
+                )
+                config.validate()
+                self.assertEqual(config.levels, expected)
+                self.assertEqual(config.duration_s, 13 * config.hold_s + config.final_keep_s)
+        self.assertEqual(RunConfig(sweep_start_v=-0.4, sweep_stop_v=-0.6,
+                                   sweep_step_v=-0.1).levels, expected[:3])
+        self.assertEqual(RunConfig(sweep_start_v=-0.4, sweep_stop_v=-0.4,
+                                   sweep_pattern="back_and_forth", sweep_cycles=3).levels,
+                         (-0.4,))
+
+    def test_sweep_mode_and_gate_bounds_validation(self) -> None:
+        for kwargs, message in (
+            ({"mode": "unknown"}, "Mode"),
+            ({"sweep_pattern": "unknown"}, "Sweep pattern"),
+            ({"sweep_pattern": "back_and_forth", "sweep_cycles": 0}, "Cycles"),
+            ({"mode": "monitor", "sweep_start_v": -2.0,
+              "sweep_stop_v": -2.0}, "gate bounds"),
+        ):
+            with self.subTest(kwargs=kwargs), self.assertRaisesRegex(ValueError, message):
+                RunConfig(**kwargs).validate()
+
+    def test_vref_monitor_sweeps_gate_without_feedback_correction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "monitor.txt"
+            config = RunConfig(
+                mode="monitor", simulation=True,
+                sweep_start_v=-0.4, sweep_stop_v=-0.6, sweep_step_v=-0.1,
+                sweep_pattern="back_and_forth", sweep_cycles=3,
+                hold_s=0.1, delay_s=0, final_keep_s=0,
+                sample_interval_s=0.1, output_file=str(path),
+            )
+            samples = []
+            with patch.object(runner, "next_feedback_gate",
+                              side_effect=AssertionError("monitor used feedback")):
+                result = runner.run_experiment(config, on_sample=samples.append)
+            with path.open(newline="", encoding="utf-8") as stream:
+                rows = list(csv.DictReader(stream, delimiter="\t"))
+
+        self.assertEqual([s.target_v for s in samples if s.stage_index == 1][:1], [-0.4])
+        stage_first = {}
+        for sample in samples:
+            stage_first.setdefault(sample.stage_index, sample)
+        self.assertEqual(tuple(stage_first), tuple(range(1, 14)))
+        self.assertEqual(tuple(s.target_v for s in stage_first.values()), config.levels)
+        self.assertEqual(tuple(round(s.gate_v, 10) for s in stage_first.values()), config.levels)
+        self.assertTrue(all(s.within_tolerance is None for s in samples))
+        gaps = [b.elapsed_s - a.elapsed_s for a, b in zip(samples, samples[1:])]
+        self.assertLess(max(gaps), 0.15)
+        self.assertEqual(len(rows), result.samples)
+        self.assertEqual(list(rows[0]), list(runner.FIELDS))
+        for row, sample in zip(rows, samples):
+            self.assertAlmostEqual(float(row["GateV"]), sample.gate_v)
+            self.assertAlmostEqual(float(row["Vref"]), sample.vref_v)
+            self.assertLess(abs(sample.vref_v - 0.82 * sample.gate_v), 0.01)
+
+    def test_feedback_uses_back_and_forth_levels_as_eref_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = RunConfig(
+                mode="feedback", simulation=True,
+                sweep_start_v=-0.4, sweep_stop_v=-0.6, sweep_step_v=-0.1,
+                sweep_pattern="back_and_forth", sweep_cycles=3,
+                hold_s=0.1, delay_s=0, final_keep_s=0,
+                sample_interval_s=0.1,
+                output_file=str(Path(temp_dir) / "feedback.txt"),
+            )
+            samples = []
+            runner.run_experiment(config, on_sample=samples.append)
+        first_by_stage = {}
+        for sample in samples:
+            first_by_stage.setdefault(sample.stage_index, sample)
+        self.assertEqual(tuple(s.target_v for s in first_by_stage.values()), config.levels)
+        self.assertEqual(tuple(first_by_stage), tuple(range(1, 14)))
+        self.assertTrue(all(s.within_tolerance is not None for s in samples))
 
     def test_feedback_acquisition_saves_measured_reference_and_converges_in_both_directions(self) -> None:
         for polarity in (1, -1):
