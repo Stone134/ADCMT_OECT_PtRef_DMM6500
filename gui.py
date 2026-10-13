@@ -7,6 +7,7 @@ import argparse
 import os
 import sys
 import threading
+from dataclasses import asdict
 from pathlib import Path
 from typing import Sequence
 
@@ -16,6 +17,7 @@ import pyqtgraph as pg
 from instruments import probe_links
 from models import RunConfig, Sample
 from runner import run_experiment
+from saved_defaults import load_defaults, save_defaults
 
 
 APP_TITLE = "OECT with reference"
@@ -141,8 +143,12 @@ class OECTWindow(QtWidgets.QMainWindow):
         outer.addWidget(self._footer())
 
         self._apply_style()
-        self._simulation_changed(True)
+        defaults_error = self._load_saved_defaults()
+        self._simulation_changed(self.simulation.isChecked())
         self._mode_changed()
+        self._sweep_pattern_changed()
+        if defaults_error:
+            self.status_label.setText(f"Saved defaults unavailable: {defaults_error}")
 
     def _header(self) -> QtWidgets.QWidget:
         card = QtWidgets.QFrame()
@@ -423,8 +429,13 @@ class OECTWindow(QtWidgets.QMainWindow):
         self.stop_button.setObjectName("stopButton")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self._stop)
+        self.save_defaults_button = QtWidgets.QPushButton("Set current as default")
+        self.save_defaults_button.setProperty("secondary", True)
+        self.save_defaults_button.setToolTip("Save the current values and options for the next launch")
+        self.save_defaults_button.clicked.connect(self._save_current_as_default)
         layout.addWidget(self.start_button, 1)
         layout.addWidget(self.stop_button, 1)
+        layout.addWidget(self.save_defaults_button)
         return card
 
     def _footer(self) -> QtWidgets.QWidget:
@@ -569,6 +580,73 @@ class OECTWindow(QtWidgets.QMainWindow):
         config.validate()
         return config
 
+    def _load_saved_defaults(self) -> str | None:
+        try:
+            values = load_defaults("single")
+            if not values:
+                return None
+            saved = RunConfig(**{
+                name: value for name, value in values.items()
+                if name in RunConfig.__dataclass_fields__
+            })
+            saved.validate()
+            text_fields = {
+                "adcmt_ip": self.adcmt_ip,
+                "dmm_ip": self.dmm_ip,
+                "output_file": self.output,
+            }
+            number_fields = {
+                "port": self.port,
+                "vds_v": self.vds,
+                "sweep_start_v": self.sweep_start,
+                "sweep_stop_v": self.sweep_stop,
+                "sweep_step_v": self.sweep_step,
+                "sweep_cycles": self.sweep_cycles,
+                "hold_s": self.hold,
+                "delay_s": self.delay,
+                "final_keep_s": self.final_keep,
+                "sample_interval_s": self.interval,
+                "gate_initial_v": self.gate_initial,
+                "gate_min_v": self.gate_min,
+                "gate_max_v": self.gate_max,
+                "correction_factor": self.correction_factor,
+                "feedback_max_step_v": self.max_step,
+                "feedback_tolerance_v": self.tolerance,
+            }
+            choices = {
+                "mode": self.measurement_mode,
+                "sweep_pattern": self.sweep_pattern,
+                "feedback_polarity": self.polarity,
+            }
+            for name, widget in text_fields.items():
+                if name in values:
+                    widget.setText(str(values[name]))
+            for name, widget in number_fields.items():
+                if name in values:
+                    widget.setValue(values[name])
+            for name, widget in choices.items():
+                if name in values:
+                    index = widget.findData(values[name])
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+            if "simulation" in values:
+                self.simulation.setChecked(bool(values["simulation"]))
+            self._config()
+        except (ValueError, TypeError, OSError) as exc:
+            return str(exc)
+        return None
+
+    def _save_current_as_default(self) -> None:
+        if self.worker is not None or self.connection_worker is not None:
+            return
+        try:
+            config = self._config()
+            save_defaults("single", asdict(config))
+        except (ValueError, TypeError, OSError) as exc:
+            QtWidgets.QMessageBox.warning(self, "Cannot save defaults", str(exc))
+            return
+        self.status_label.setText("Current settings saved as defaults for the next launch")
+
     def _clear_plots(self) -> None:
         for values in self._plot_data.values():
             values.clear()
@@ -670,6 +748,7 @@ class OECTWindow(QtWidgets.QMainWindow):
     def _set_running(self, running: bool) -> None:
         self.start_button.setEnabled(not running)
         self.stop_button.setEnabled(running)
+        self.save_defaults_button.setEnabled(not running)
         self.simulation.setEnabled(not running)
         for widget in (
             self.vds, self.sweep_start, self.sweep_stop, self.sweep_step,
@@ -694,6 +773,7 @@ class OECTWindow(QtWidgets.QMainWindow):
             return
         self.test_button.setEnabled(False)
         self.start_button.setEnabled(False)
+        self.save_defaults_button.setEnabled(False)
         self.status_label.setText("Testing read-only connections to ADCMT and DMM6500…")
         self.connection_worker = ConnectionWorker(adcmt_host, dmm_host, self.port.value(), self)
         self.connection_worker.probe_complete.connect(self._on_probe_complete)
@@ -711,6 +791,7 @@ class OECTWindow(QtWidgets.QMainWindow):
     def _on_probe_finished(self) -> None:
         self.connection_worker = None
         self.start_button.setEnabled(self.worker is None)
+        self.save_defaults_button.setEnabled(self.worker is None)
         self.test_button.setEnabled(self.worker is None and not self.simulation.isChecked())
         if self._pending_close and self.worker is None:
             QtCore.QTimer.singleShot(0, self.close)

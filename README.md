@@ -1,12 +1,17 @@
 # OECT with reference
 
-This is a standalone, single-OECT Python project. It uses ADCMT 6541 CH1 for
+This folder contains a single-OECT program (`gui.py`) and a dual-OECT program
+(`dual_gui.py`). The single-OECT program uses ADCMT 6541 CH1 for
 drain bias/current, CH2 for gate bias/current, and a Keithley DMM6500 for the
 voltage of a **separate reference electrode through a high-impedance input**. The GUI follows the
 cream-card/teal style of the earlier OECT program. The colleague's project was
 used as a workflow example; its 10 MΩ DMM setup is **not** used here.
 The DAQ6510 is not used in this version; the DMM6500 is the dedicated Vref
 measurement instrument.
+
+The dual program keeps this CH1/CH2/DMM setup for OECT A and adds a direct-gate
+OECT B on CH3/CH4. Its instructions are in the [dual-OECT section](#dual-oect-program)
+below.
 
 ## Instrument connections
 
@@ -216,3 +221,80 @@ before and after a run.
 - [DMM6500 specifications](https://download.tek.com/document/SPEC-DMM6500A_April_2018.pdf)
 - Local ADCMT 6540/6541 operation manual:
   `../6540-41-ope-foe-00000147b01-e.pdf`
+
+## Dual-OECT program
+
+Run the second GUI from this project folder:
+
+```bash
+.venv/bin/python dual_gui.py
+```
+
+Or double-click `launch_dual_gui.command` on macOS. It starts in simulation,
+which sends no instrument commands.
+
+| Device | ADCMT channels | Control | Raw file |
+| --- | --- | --- | --- |
+| OECT A | CH1 drain, CH2 gate | Reference feedback or direct Vg sweep with DMM6500 Vref monitoring | `outputs/oect_a.txt` |
+| OECT B | CH3 drain, CH4 gate | Direct Vg sweep; no reference input | `outputs/oect_b.txt` |
+
+Connect each channel's OUTPUT and SENSE to its intended device terminals as
+described in [Instrument connections](#instrument-connections). For OECT B,
+CH3 HI goes to B's drain, CH4 HI goes to B's gate, and their LO connections
+go to B's source. The DMM6500 INPUT HI connects only to A's separate reference
+electrode and INPUT LO to A's source. Its reading is
+`Vref = V(reference) − V(source)`; feedback targets use the same sign. The DMM
+is verified in high-impedance DC-voltage mode before any ADCMT output is
+enabled. The four ADCMT current limits are fixed at 0.003 A (3 mA) in the GUI.
+
+OECT A keeps the original program's feedback direction, correction factor,
+maximum correction, tolerance, gate bounds, delay-period logging, and one-way
+or back-and-forth sweeps. In **Vref monitor** mode, A's sweep values are
+programmed Vg values and measured Vref never changes Vg. OECT B's sweep
+values are always programmed Vg values. Each OECT has its own Vds, sweep,
+read interval, period, delay, final keep time, and file. A back-and-forth
+cycle goes initial → final → initial without duplicating the turnaround point.
+
+The ADCMT uses CH1 as the sampling-clock master and CH2–CH4 as synchronized
+slaves. The two requested read intervals must have a common hardware interval
+of at least 0.1 s; the GUI validates this before a run. A's DMM reading
+follows the current pair over LAN and is not hardware simultaneous.
+
+### Independent completion and separate files
+
+When one OECT finishes, the program sets and verifies **both its gate and
+drain sources at 0 V**, closes its raw-data file, and keeps the other OECT
+running. If A finishes first, CH1 remains operating at 0 V so its clock
+continues to trigger B. On Stop, error, or after both finish, all four
+channels are set to 0 V and verified in Standby. Standby disconnects the
+output, so it is only used for final cleanup, not for the completed cell's
+zero-volt wait.
+
+The GUI asks before replacing either existing text file. OECT A retains the
+six-column format `Time GateI GateV DrainI DrainV Vref`; OECT B writes
+`Time GateI GateV DrainI DrainV`. The files are tab-delimited and use seconds,
+amperes, and volts. Their voltage columns are verified source setpoints and
+current columns are measured. No rows are written after a cell completes.
+The two paths must differ; relative paths resolve from this project folder.
+
+As in the single-OECT program, A's `Time` is elapsed host time when its DMM
+reading returns. B's `Time` is the nominal time of its synchronized ADCMT
+current sample. Vref is measured near, rather than on, the ADCMT trigger.
+
+Use simulation to check both schedules and files before a live run. Confirm
+A's feedback direction from a small gate perturbation, the DMM's FRONT
+terminal selection, and both cell source connections. Live four-channel
+operation has not been exercised against the attached instrument in this
+workspace. The synchronization and zero-volt wait follow the local ADCMT
+manual listed above and the earlier dual-OECT implementation in this
+workspace.
+
+## Saving GUI defaults
+
+Both GUIs have a **Set current as default** button. After you choose the
+numbers and options you want, click it to save those settings for the next
+launch of that GUI. The single and dual programs keep separate local files,
+`single_gui_defaults.json` and `dual_gui_defaults.json`, in this project
+folder. Each GUI validates the current settings before saving. The saved
+defaults include connection addresses, modes, sweep values, timing, feedback
+settings, and output paths; the button does not start a measurement.
